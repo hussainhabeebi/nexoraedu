@@ -113,39 +113,46 @@ The end-to-end suite covers: auth and RBAC, duplicate detection, lost-reason enf
 ## Deploying on Cloudflare (nexoraedu.com)
 
 ```
-Browser ──▶ Cloudflare Pages  (nexoraedu.com: website + staff + student portals)
-               └─ /api/*  Pages Function proxy ──▶ Cloudflare Tunnel (api.nexoraedu.com)
-                                                     └─ server: docker compose → API + PostgreSQL + nightly backup
+Browser ──▶ Cloudflare Worker "nexoraedu"  (static site + portals, wrangler.jsonc)
+               └─ /api/*, /health ──▶ Cloudflare Tunnel (api.nexoraedu.com)
+                                        └─ server: docker compose → API + PostgreSQL + nightly backup
 Chatwoot (app.aiingo.com) webhooks ──▶ https://nexoraedu.com/api/v1/webhooks/chatwoot
 ```
 
-The frontend is static and runs on **Cloudflare Pages**. The backend (Express + PostgreSQL + file uploads) runs in Docker on any small Linux server or VM. It is exposed only through a **Cloudflare Tunnel**: no open ports, and TLS and DDoS protection come from Cloudflare.
+**1. Worker (Cloudflare dashboard → Workers & Pages → Create → Import a repository → `hussainhabeebi/nexoraedu`)**
 
-**1. Backend server (one time)**
-1. Cloudflare dashboard → Zero Trust → Networks → **Tunnels → Create tunnel** (Cloudflared, Docker) → copy the token. Add a public hostname `api.nexoraedu.com` → service `http://api:4000`.
-2. On the server (with Docker installed):
+| Setting | Value |
+|---|---|
+| Project name | `nexoraedu` |
+| Build command | `npm run build` |
+| Deploy command | `npx wrangler deploy` |
+| Non-production branch deploy command | `npx wrangler versions upload` |
+| Production branch | `main` |
+| Root directory | `/` (leave empty) |
+| Build variable | `NODE_VERSION` = `22` |
+
+After the first deploy go to Worker → Settings:
+- **Variables and Secrets:** check that `API_ORIGIN` = `https://api.nexoraedu.com` (it comes from `wrangler.jsonc`). Add the secret **`PROXY_SECRET`** with the same value as in `deploy/.env`.
+- **Domains & Routes:** add the custom domains `nexoraedu.com` and `www.nexoraedu.com`.
+
+**2. Backend server + Cloudflare Tunnel**
+1. Zero Trust → Networks → **Tunnels → Create tunnel** (Cloudflared, Docker) → copy the token. Add a public hostname `api.nexoraedu.com` → service `http://api:4000`.
+2. On any Linux server with Docker:
    ```bash
    git clone https://github.com/hussainhabeebi/nexoraedu && cd nexoraedu
-   cp deploy/.env.cloudflare.example deploy/.env   # fill in secrets, tunnel token, PROXY_SECRET, Chatwoot
+   cp deploy/.env.cloudflare.example deploy/.env   # secrets, tunnel token, PROXY_SECRET, Chatwoot
    docker compose -f deploy/docker-compose.cloudflare.yml --env-file deploy/.env up -d --build
    ```
-   The API runs migrations and the seed on start. Check it with `https://api.nexoraedu.com/health`.
+   The API runs migrations and the seed on start. Check it with `https://nexoraedu.com/health`.
+   To update: `git pull && docker compose -f deploy/docker-compose.cloudflare.yml --env-file deploy/.env up -d --build`.
 
-**2. Cloudflare Pages (one time)**
-1. Workers & Pages → Create → Pages → **Direct Upload** → project name `nexoraedu` (CI deploys into it).
-2. Project → Settings → Variables: `API_ORIGIN=https://api.nexoraedu.com`, plus the secret `PROXY_SECRET` (same value as in `deploy/.env`).
-3. Custom domains → add `nexoraedu.com` (and `www.nexoraedu.com`).
-
-**3. GitHub Actions** (`.github/workflows/deploy.yml`)
-- Repo → Settings → Secrets → Actions: `CLOUDFLARE_API_TOKEN` (permission: *Cloudflare Pages → Edit*) and `CLOUDFLARE_ACCOUNT_ID`.
-- Every push to `main` runs the backend tests against PostgreSQL and the frontend build, then deploys to Pages.
-- Backend updates: on the server run `git pull && docker compose -f deploy/docker-compose.cloudflare.yml --env-file deploy/.env up -d --build`.
-
-**4. Go-live checklist**
+**3. Go-live checklist**
 - Sign in as `admin` with `SEED_ADMIN_PASSWORD` and change the password.
 - Settings → General: academy phone, WhatsApp number and address.
 - Settings → WhatsApp: Account ID, inbox ID, token → Test connection. Then add the webhook in Chatwoot.
 - Create staff users. Review courses, fees and batches.
+
+GitHub Actions (`.github/workflows/deploy.yml`) runs the backend tests and the frontend build on every push and pull request.
 
 ## Deploying on your own server (alternative)
 

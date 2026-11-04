@@ -1,4 +1,5 @@
-name: CI & deploy
+name: CI
+# Deployment is done by Cloudflare Workers Builds (connected to this repo) on every push to main.
 
 on:
   push:
@@ -28,22 +29,3 @@ jobs:
       - name: Frontend — typecheck & build
         working-directory: frontend
         run: npm ci && npx tsc -b && npx vite build
-
-  deploy-web:
-    needs: test
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions: { contents: read, deployments: write }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22 }
-      - working-directory: frontend
-        run: npm ci && npx vite build
-      - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: frontend
-          command: pages deploy dist --project-name=nexoraedu --branch=main

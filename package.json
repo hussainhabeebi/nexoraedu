@@ -2,9 +2,13 @@
   "name": "nexoraedu",
   "private": true,
   "scripts": {
+    "build": "npm --prefix frontend ci && npm --prefix frontend run build",
+    "build:all": "npm --prefix backend run build && npm --prefix frontend run build",
     "dev:api": "npm --prefix backend run dev",
     "dev:web": "npm --prefix frontend run dev",
-    "test": "npm --prefix backend test",
-    "build": "npm --prefix backend run build && npm --prefix frontend run build"
+    "test": "npm --prefix backend test"
+  },
+  "devDependencies": {
+    "wrangler": "4.157.0"
   }
 }

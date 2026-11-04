@@ -7,3 +7,4 @@ frontend/dist/
 .DS_Store
 coverage/
 deploy/.env
+.wrangler/

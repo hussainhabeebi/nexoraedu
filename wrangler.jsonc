@@ -1,0 +1,19 @@
+// Cloudflare Worker: nexoraedu.com (website + staff & student portals + /api proxy)
+{
+  "$schema": "frontend/node_modules/wrangler/config-schema.json",
+  "name": "nexoraedu",
+  "main": "frontend/worker/index.ts",
+  "compatibility_date": "2025-09-01",
+  "assets": {
+    "directory": "./frontend/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/health"]
+  },
+  "vars": {
+    // Public HTTPS URL of the backend (Cloudflare Tunnel hostname)
+    "API_ORIGIN": "https://api.nexoraedu.com"
+  },
+  // PROXY_SECRET is a secret: Worker → Settings → Variables and Secrets (or `npx wrangler secret put PROXY_SECRET`)
+  "observability": { "enabled": true }
+}
