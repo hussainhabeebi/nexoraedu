@@ -26,7 +26,7 @@ services:
     depends_on: { db: { condition: service_healthy } }
 
   # Cloudflare Tunnel: Zero Trust → Networks → Tunnels → Create → Docker → copy the token.
-  # Public hostname: api.nexoraedu.com → Service http://api:4000
+  # Public hostname: api.nexoraed.com → Service http://api:4000
   cloudflared:
     image: cloudflare/cloudflared:2025.1.0
     restart: unless-stopped

@@ -4,7 +4,7 @@ export const DEFAULT_SETTINGS = {
   academy: {
     name: 'Nexora Academy',
     tagline: 'Skills that shape tomorrow',
-    email: 'info@nexoraedu.com',
+    email: 'info@nexoraed.com',
     phone: '+91 90000 00000',
     whatsapp: '+919000000000',
     address: 'Nexora Academy, Kerala, India',

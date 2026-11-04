@@ -1,7 +1,7 @@
 /**
- * Cloudflare Worker for nexoraedu.com.
+ * Cloudflare Worker for nexoraed.com.
  *  - Static assets (the built React app in ./dist) are served by Workers Static Assets with SPA fallback.
- *  - /api/* and /health are proxied to the Nexora backend (API_ORIGIN, e.g. https://api.nexoraedu.com
+ *  - /api/* and /health are proxied to the Nexora backend (API_ORIGIN, e.g. https://api.nexoraed.com
  *    published via Cloudflare Tunnel), so site and API share one origin.
  */
 interface Env {

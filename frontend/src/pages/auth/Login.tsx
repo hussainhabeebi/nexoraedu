@@ -34,7 +34,7 @@ export default function Login({ portal }: { portal: 'staff' | 'student' }) {
         } catch (e) { setErr(e); } finally { setBusy(false); }
       }}>
         <ErrorBox error={err} />
-        <Input label={student ? 'Student ID or email' : 'Username or email'} required autoComplete="username" value={f.identifier} onChange={(e) => setF({ ...f, identifier: e.target.value })} placeholder={student ? 'nxa-2026-00001' : 'you@nexoraedu.com'} />
+        <Input label={student ? 'Student ID or email' : 'Username or email'} required autoComplete="username" value={f.identifier} onChange={(e) => setF({ ...f, identifier: e.target.value })} placeholder={student ? 'nxa-2026-00001' : 'you@nexoraed.com'} />
         <div>
           <label className="label" htmlFor="pw">Password <span className="text-rose-600">*</span></label>
           <div className="relative">

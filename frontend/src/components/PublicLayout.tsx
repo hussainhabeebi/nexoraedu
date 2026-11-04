@@ -80,7 +80,7 @@ export default function PublicLayout() {
             </ul>
           </div>
         </div>
-        <div className="border-t border-white/10 py-5 text-center text-xs">© {new Date().getFullYear()} {a?.name ?? 'Nexora Academy'} · nexoraedu.com</div>
+        <div className="border-t border-white/10 py-5 text-center text-xs">© {new Date().getFullYear()} {a?.name ?? 'Nexora Academy'} · nexoraed.com</div>
       </footer>
       {a?.whatsapp && (
         <a href={waLink(a.whatsapp)} target="_blank" rel="noreferrer" className="fixed bottom-5 right-5 z-40 flex items-center gap-2 rounded-full bg-[#25D366] px-4 py-3 font-semibold text-white shadow-lg transition hover:scale-105" aria-label="Chat with us on WhatsApp">

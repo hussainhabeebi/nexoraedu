@@ -22,7 +22,7 @@ async function main() {
   const mkUser = async (username: string, name: string, role: string, department?: string, phone?: string) =>
     prisma.user.upsert({
       where: { username },
-      create: { username, email: `${username}@nexoraedu.com`, name, phone, passwordHash: pw, departmentId: department ? dept[department] : null, designation: DEFAULT_ROLES.find((r) => r.key === role)?.name, roles: { create: { roleId: roles[role] } }, ...(role === 'faculty' && { faculty: { create: { qualifications: 'M.Tech', subjects: [] } } }) },
+      create: { username, email: `${username}@nexoraed.com`, name, phone, passwordHash: pw, departmentId: department ? dept[department] : null, designation: DEFAULT_ROLES.find((r) => r.key === role)?.name, roles: { create: { roleId: roles[role] } }, ...(role === 'faculty' && { faculty: { create: { qualifications: 'M.Tech', subjects: [] } } }) },
       update: {},
     });
   await mkUser('admin', 'Super Administrator', 'super_admin');

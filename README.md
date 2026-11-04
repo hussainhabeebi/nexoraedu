@@ -1,4 +1,4 @@
-# Nexora Academy — Centralized Management Portal (nexoraedu.com)
+# Nexora Academy — Centralized Management Portal (nexoraed.com)
 
 A role-based web portal covering the full student journey from the SRS v1.0:
 
@@ -58,7 +58,7 @@ Home (fee balance and next due, attendance, upcoming classes, exams, results) ·
 3. **WhatsApp inbox ID:** Chatwoot → Settings → Inboxes → your WhatsApp inbox (the number in its URL)
 4. **API access token:** Chatwoot → Profile settings → Access token. It is stored AES-256-GCM encrypted and never shown again.
 5. Click **Generate secret**, then **Save**, then **Test connection**.
-6. In Chatwoot → Settings → Integrations → **Webhooks**, add the URL shown on the page (`https://nexoraedu.com/api/v1/webhooks/chatwoot?token=…`) and select *Message created* and *Message updated*.
+6. In Chatwoot → Settings → Integrations → **Webhooks**, add the URL shown on the page (`https://nexoraed.com/api/v1/webhooks/chatwoot?token=…`) and select *Message created* and *Message updated*.
 7. For messages outside WhatsApp's 24-hour window, enter the **approved template name** on each notification template. `{{placeholders}}` map to `{{1}}`, `{{2}}`… in the order they appear.
 
 You can also provide these values as environment variables (`CHATWOOT_*` in `backend/.env.example`).
@@ -110,13 +110,13 @@ The end-to-end suite covers: auth and RBAC, duplicate detection, lost-reason enf
 
 ---
 
-## Deploying on Cloudflare (nexoraedu.com)
+## Deploying on Cloudflare (nexoraed.com)
 
 ```
 Browser ──▶ Cloudflare Worker "nexoraedu"  (static site + portals, wrangler.jsonc)
-               └─ /api/*, /health ──▶ Cloudflare Tunnel (api.nexoraedu.com)
+               └─ /api/*, /health ──▶ Cloudflare Tunnel (api.nexoraed.com)
                                         └─ server: docker compose → API + PostgreSQL + nightly backup
-Chatwoot (app.aiingo.com) webhooks ──▶ https://nexoraedu.com/api/v1/webhooks/chatwoot
+Chatwoot (app.aiingo.com) webhooks ──▶ https://nexoraed.com/api/v1/webhooks/chatwoot
 ```
 
 **1. Worker (Cloudflare dashboard → Workers & Pages → Create → Import a repository → `hussainhabeebi/nexoraedu`)**
@@ -132,18 +132,18 @@ Chatwoot (app.aiingo.com) webhooks ──▶ https://nexoraedu.com/api/v1/webhoo
 | Build variable | `NODE_VERSION` = `22` |
 
 After the first deploy go to Worker → Settings:
-- **Variables and Secrets:** check that `API_ORIGIN` = `https://api.nexoraedu.com` (it comes from `wrangler.jsonc`). Add the secret **`PROXY_SECRET`** with the same value as in `deploy/.env`.
-- **Domains & Routes:** add the custom domains `nexoraedu.com` and `www.nexoraedu.com`.
+- **Variables and Secrets:** check that `API_ORIGIN` = `https://api.nexoraed.com` (it comes from `wrangler.jsonc`). Add the secret **`PROXY_SECRET`** with the same value as in `deploy/.env`.
+- **Domains & Routes:** add the custom domains `nexoraed.com` and `www.nexoraed.com`.
 
 **2. Backend server + Cloudflare Tunnel**
-1. Zero Trust → Networks → **Tunnels → Create tunnel** (Cloudflared, Docker) → copy the token. Add a public hostname `api.nexoraedu.com` → service `http://api:4000`.
+1. Zero Trust → Networks → **Tunnels → Create tunnel** (Cloudflared, Docker) → copy the token. Add a public hostname `api.nexoraed.com` → service `http://api:4000`.
 2. On any Linux server with Docker:
    ```bash
    git clone https://github.com/hussainhabeebi/nexoraedu && cd nexoraedu
    cp deploy/.env.cloudflare.example deploy/.env   # secrets, tunnel token, PROXY_SECRET, Chatwoot
    docker compose -f deploy/docker-compose.cloudflare.yml --env-file deploy/.env up -d --build
    ```
-   The API runs migrations and the seed on start. Check it with `https://nexoraedu.com/health`.
+   The API runs migrations and the seed on start. Check it with `https://nexoraed.com/health`.
    To update: `git pull && docker compose -f deploy/docker-compose.cloudflare.yml --env-file deploy/.env up -d --build`.
 
 **3. Go-live checklist**
@@ -159,8 +159,8 @@ GitHub Actions (`.github/workflows/deploy.yml`) runs the backend tests and the f
 ```bash
 cp backend/.env.example .env
 # set: JWT_SECRET, APP_ENCRYPTION_KEY (openssl rand -hex 32), POSTGRES_PASSWORD,
-#      PUBLIC_APP_URL=https://nexoraedu.com, API_BASE_URL=https://nexoraedu.com,
-#      CORS_ORIGINS=https://nexoraedu.com, CHATWOOT_* (optional), SMTP_* (optional),
+#      PUBLIC_APP_URL=https://nexoraed.com, API_BASE_URL=https://nexoraed.com,
+#      CORS_ORIGINS=https://nexoraed.com, CHATWOOT_* (optional), SMTP_* (optional),
 #      SEED_ADMIN_PASSWORD, SEED_DEMO=false
 docker compose up -d --build        # web on :8080 → put behind TLS (Caddy / nginx / Cloudflare)
 ```

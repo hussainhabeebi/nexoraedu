@@ -36,6 +36,6 @@ export const config = {
   },
   smtp: {
     host: process.env.SMTP_HOST || '',
-    from: process.env.MAIL_FROM || 'Nexora Academy <no-reply@nexoraedu.com>',
+    from: process.env.MAIL_FROM || 'Nexora Academy <no-reply@nexoraed.com>',
   },
 };
