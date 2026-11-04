@@ -35,6 +35,7 @@ export async function createFeePlan(tx: Tx, p: { studentId: string; courseId: st
     const amount = i === n - 1 ? money(gross - base * (n - 1)) : base;
     const due = new Date(start);
     due.setMonth(due.getMonth() + i);
+    due.setHours(23, 59, 59, 0);
     const inst = await tx.installment.create({ data: { feePlanId: plan.id, seq: i + 1, amount, dueDate: due } });
     const number = await nextNumber(`invoice:${new Date().getFullYear()}`, s.ids.invoice, tx);
     await tx.invoice.create({ data: { number, studentId: p.studentId, feePlanId: plan.id, installmentId: inst.id, amount, dueDate: due } });

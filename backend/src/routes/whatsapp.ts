@@ -59,6 +59,13 @@ const sendSchema = z.object({
   template: z.object({ name: z.string(), language: z.string().default('en'), category: z.string().default('UTILITY'), params: z.array(z.string()).default([]) }).optional(),
 });
 
+r.post('/conversations/:id/reply', can('whatsapp:send'), ah(async (req, res) => {
+  const d = sendSchema.parse(req.body);
+  const out = await cw.replyToConversation(Number(req.params.id), d.content, d.template);
+  await audit(req, 'WHATSAPP_REPLY', 'whatsapp', String(req.params.id));
+  res.json(out);
+}));
+
 async function logLeadWa(leadId: string, userId: string, content: string, conversationId: number) {
   await prisma.$transaction([
     prisma.leadActivity.create({ data: { leadId, type: 'WHATSAPP', direction: 'OUTBOUND', content, userId, meta: { conversationId } } }),

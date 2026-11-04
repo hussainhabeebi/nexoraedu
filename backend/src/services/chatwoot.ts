@@ -252,3 +252,11 @@ export async function toggleConversationStatus(conversationId: number, status: '
 export async function addPrivateNote(conversationId: number, content: string) {
   return cw('POST', `/conversations/${conversationId}/messages`, { content, message_type: 'outgoing', private: true });
 }
+
+/** Reply directly inside an existing conversation (contacts not yet linked to a lead/student). */
+export async function replyToConversation(conversationId: number, content: string, template?: WaTemplate) {
+  const body: any = { content, message_type: 'outgoing', private: false };
+  if (template) body.template_params = { name: template.name, category: template.category || 'UTILITY', language: template.language || 'en', processed_params: Object.fromEntries((template.params || []).map((v, i) => [String(i + 1), v])) };
+  const msg = await cw<any>('POST', `/conversations/${conversationId}/messages`, body);
+  return { conversationId, messageId: Number(msg.id) };
+}
