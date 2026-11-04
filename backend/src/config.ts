@@ -22,6 +22,9 @@ export const config = {
   encryptionKey: env('APP_ENCRYPTION_KEY', isProd ? undefined : '0'.repeat(64)),
   uploadDir: env('UPLOAD_DIR', './uploads'),
   maxUploadMb: Number(env('MAX_UPLOAD_MB', '5')),
+  /** Shared secret set on the Cloudflare Pages proxy; when it matches, X-Client-IP is the real client IP. */
+  proxySecret: process.env.PROXY_SECRET || '',
+  trustProxy: Number(process.env.TRUST_PROXY ?? 1),
   jobsEnabled: env('JOBS_ENABLED', 'true') === 'true',
   chatwoot: {
     // Defaults; may be overridden from Settings → Integrations (stored encrypted in DB).

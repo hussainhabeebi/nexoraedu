@@ -1,0 +1,8 @@
+# Cloudflare Pages project for the Nexora website, staff and student portals.
+name = "nexoraedu"
+pages_build_output_dir = "dist"
+compatibility_date = "2025-01-01"
+
+[vars]
+# Public HTTPS URL of the backend (Cloudflare Tunnel hostname). Override in the Pages dashboard if different.
+API_ORIGIN = "https://api.nexoraedu.com"

@@ -1,0 +1,49 @@
+name: CI & deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: nexora, POSTGRES_PASSWORD: nexora, POSTGRES_DB: nexora_test }
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://nexora:nexora@localhost:5432/nexora_test?schema=public
+      TEST_DATABASE_URL: postgresql://nexora:nexora@localhost:5432/nexora_test?schema=public
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Backend — typecheck & tests
+        working-directory: backend
+        run: npm ci && npx prisma generate && npx tsc --noEmit && npm test
+      - name: Frontend — typecheck & build
+        working-directory: frontend
+        run: npm ci && npx tsc -b && npx vite build
+
+  deploy-web:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions: { contents: read, deployments: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - working-directory: frontend
+        run: npm ci && npx vite build
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: frontend
+          command: pages deploy dist --project-name=nexoraedu --branch=main

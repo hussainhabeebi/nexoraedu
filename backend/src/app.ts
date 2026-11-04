@@ -30,7 +30,12 @@ import portalRoutes from './routes/portal';
 export function createApp() {
   registerHandlers();
   const app = express();
-  app.set('trust proxy', 1);
+  app.set('trust proxy', config.trustProxy);
+  app.use((req, _res, next) => {
+    const ip = req.get('x-client-ip');
+    if (config.proxySecret && ip && req.get('x-proxy-secret') === config.proxySecret) Object.defineProperty(req, 'ip', { value: ip, configurable: true });
+    next();
+  });
   app.disable('x-powered-by');
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
   app.use(cors({ origin: config.corsOrigins, credentials: true }));

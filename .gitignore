@@ -6,3 +6,4 @@ backend/uploads/
 frontend/dist/
 .DS_Store
 coverage/
+deploy/.env
