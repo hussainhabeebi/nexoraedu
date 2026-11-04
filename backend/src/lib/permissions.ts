@@ -1,0 +1,47 @@
+/** Permission catalogue (ADM-03) and default role grants mirroring SRS §6.12 matrix. */
+export const PERMISSIONS = {
+  'users:read': 'View users', 'users:manage': 'Create / edit / deactivate users',
+  'roles:manage': 'Manage roles & permissions', 'settings:manage': 'System settings, workflows & integrations',
+  'masters:manage': 'Master data & courses',
+  'leads:read': 'View own leads', 'leads:read_all': 'View all leads', 'leads:create': 'Create leads',
+  'leads:update': 'Update leads', 'leads:delete': 'Delete / merge leads', 'leads:assign': 'Assign & reassign leads',
+  'students:read': 'View students', 'students:read_batch': 'View students in own batches',
+  'students:manage': 'Register & update students', 'documents:verify': 'Verify documents',
+  'finance:read': 'View finance', 'finance:collect': 'Record payments & invoices', 'finance:manage': 'Fee structures, discounts, refunds',
+  'academics:read': 'View academics', 'academics:manage': 'Batches, timetable, faculty allocation',
+  'attendance:mark': 'Mark attendance', 'materials:manage': 'Materials & assignments',
+  'exams:read': 'View exams', 'exams:manage': 'Question bank, exams, results',
+  'reports:read': 'View & export reports', 'approvals:act': 'Act on approvals', 'audit:read': 'View audit logs',
+  'whatsapp:send': 'Send WhatsApp messages (Chatwoot)', 'notifications:manage': 'Manage notification templates',
+} as const;
+export type Permission = keyof typeof PERMISSIONS | '*' | 'portal:student';
+
+export const DEFAULT_ROLES: { key: string; name: string; permissions: Permission[] }[] = [
+  { key: 'super_admin', name: 'Super Administrator', permissions: ['*'] },
+  {
+    key: 'management', name: 'Management',
+    permissions: ['users:read', 'leads:read', 'leads:read_all', 'students:read', 'finance:read', 'academics:read', 'exams:read', 'reports:read', 'approvals:act', 'audit:read'],
+  },
+  {
+    key: 'admin', name: 'Administrator',
+    permissions: ['users:read', 'users:manage', 'masters:manage', 'leads:read', 'leads:read_all', 'students:read', 'students:manage', 'documents:verify', 'finance:read', 'academics:read', 'exams:read', 'reports:read', 'notifications:manage', 'whatsapp:send'],
+  },
+  {
+    key: 'sales_manager', name: 'Sales Manager',
+    permissions: ['leads:read', 'leads:read_all', 'leads:create', 'leads:update', 'leads:delete', 'leads:assign', 'students:read', 'reports:read', 'approvals:act', 'whatsapp:send'],
+  },
+  { key: 'counselor', name: 'Counselor', permissions: ['leads:read', 'leads:create', 'leads:update', 'students:read', 'reports:read', 'whatsapp:send'] },
+  { key: 'finance_manager', name: 'Finance Manager', permissions: ['finance:read', 'finance:collect', 'finance:manage', 'students:read', 'reports:read', 'approvals:act', 'whatsapp:send'] },
+  { key: 'finance_staff', name: 'Finance Staff', permissions: ['finance:read', 'finance:collect', 'students:read', 'reports:read', 'whatsapp:send'] },
+  {
+    key: 'academic_manager', name: 'Academic Manager',
+    permissions: ['academics:read', 'academics:manage', 'attendance:mark', 'materials:manage', 'students:read', 'exams:read', 'reports:read', 'approvals:act', 'whatsapp:send'],
+  },
+  { key: 'faculty', name: 'Faculty', permissions: ['academics:read', 'attendance:mark', 'materials:manage', 'students:read_batch', 'exams:read', 'reports:read'] },
+  { key: 'exam_officer', name: 'Examination Officer', permissions: ['exams:read', 'exams:manage', 'students:read', 'reports:read', 'approvals:act', 'whatsapp:send'] },
+  { key: 'student', name: 'Student', permissions: ['portal:student'] },
+];
+
+export function hasPerm(perms: string[], p: string) {
+  return perms.includes('*') || perms.includes(p);
+}
