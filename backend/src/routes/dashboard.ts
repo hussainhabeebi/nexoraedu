@@ -121,10 +121,10 @@ r.get('/', ah(async (req, res) => {
     const [todayCol, monthCol, upcoming, pendingDiscounts, pendingRefunds, overdueInst] = await Promise.all([
       sumPayments(today),
       sumPayments(startOfMonth()),
-      prisma.installment.findMany({ where: { status: { not: 'PAID' }, dueDate: { gte: today, lt: new Date(Date.now() + 7 * 864e5) } }, include: { feePlan: { include: { student: { select: { id: true, fullName: true, studentCode: true } } } } }, orderBy: { dueDate: 'asc' }, take: 10 }),
+      prisma.installment.findMany({ where: { status: { in: ['DUE', 'PARTIAL'] }, dueDate: { gte: today, lt: new Date(Date.now() + 7 * 864e5) } }, include: { feePlan: { include: { student: { select: { id: true, fullName: true, studentCode: true } } } } }, orderBy: { dueDate: 'asc' }, take: 10 }),
       prisma.discount.count({ where: { status: 'PENDING_APPROVAL' } }),
       prisma.refund.count({ where: { status: { in: ['PENDING_APPROVAL', 'APPROVED'] } } }),
-      prisma.installment.findMany({ where: { status: { not: 'PAID' }, dueDate: { lt: today } }, select: { amount: true, paidAmount: true, dueDate: true } }),
+      prisma.installment.findMany({ where: { status: { in: ['DUE', 'PARTIAL'] }, dueDate: { lt: today } }, select: { amount: true, paidAmount: true, dueDate: true } }),
     ]);
     const ageing = { d0_30: 0, d31_60: 0, d61_90: 0, d90p: 0 };
     for (const i of overdueInst) {

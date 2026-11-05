@@ -136,6 +136,6 @@ export async function cancelEnrollment(tx: Tx, p: { studentId: string; enrollmen
   const paid = planIds.length ? await tx.paymentAllocation.count({ where: { installment: { feePlanId: { in: planIds } }, payment: { status: { not: 'CANCELLED' } } } }) : 0;
   if (paid) throw conflict('Payments are recorded against this enrollment. Cancel the receipts (approval) or withdraw the student instead.');
   const closed = await closeEnrollment(tx, e.id, 'CANCELLED', p.reason, p.actorId);
-  const openPlans = planIds.length ? await tx.installment.count({ where: { feePlanId: { in: planIds }, status: { not: 'PAID' } } }) : 0;
+  const openPlans = planIds.length ? await tx.installment.count({ where: { feePlanId: { in: planIds }, status: { in: ['DUE', 'PARTIAL'] } } }) : 0;
   return { enrollment: closed, openFeePlanInstallments: openPlans };
 }

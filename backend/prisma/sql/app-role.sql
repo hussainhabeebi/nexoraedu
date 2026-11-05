@@ -33,3 +33,6 @@ SELECT format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON _prisma_migrations FRO
 
 -- Enrollment history is never deleted (status changes only).
 SELECT format('REVOKE DELETE, TRUNCATE ON enrollments FROM %I', :'app_role') WHERE to_regclass('enrollments') IS NOT NULL \gexec
+
+-- Fee adjustments are financial records: never deleted (status changes only).
+SELECT format('REVOKE DELETE, TRUNCATE ON fee_adjustments FROM %I', :'app_role') WHERE to_regclass('fee_adjustments') IS NOT NULL \gexec

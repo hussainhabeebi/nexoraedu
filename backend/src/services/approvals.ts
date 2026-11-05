@@ -33,6 +33,7 @@ export const APPROVAL_TYPES: Record<string, string> = {
   DISCOUNT: 'Fee discount / scholarship',
   REFUND: 'Refund',
   PAYMENT_CANCELLATION: 'Payment / receipt cancellation',
+  FEE_ADJUSTMENT: 'Fee adjustment (waiver / custom installment plan)',
   BATCH_TRANSFER: 'Batch transfer / course change',
   RESULT_CORRECTION: 'Result correction',
   CERTIFICATE: 'Certificate issue',

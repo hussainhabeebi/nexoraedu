@@ -9,8 +9,9 @@
  * Rules
  *  R1  LEDGER_BALANCE        per student: ledger (debit − credit) = Σ open installment amounts + Σ PAID refunds.
  *                            (A paid refund returns money; until a fee adjustment exists, it re-opens the balance.)
- *  R2  PLAN_TOTAL            per plan: Σ installment amounts = gross − applied discounts (fee_plans.discount).
- *  R3  INSTALLMENT_BOUNDS    0 ≤ paid ≤ amount, and status matches (DUE = 0 paid, PAID = fully paid, else PARTIAL).
+ *  R2  PLAN_TOTAL            per plan: Σ installment amounts = gross − applied discounts − applied waivers.
+ *  R3  INSTALLMENT_BOUNDS    0 ≤ paid ≤ amount, and status matches (DUE = 0 paid, PAID = fully paid, else PARTIAL;
+ *                            SUPERSEDED = replaced by a custom plan, amount 0 and nothing paid).
  *  R4  INSTALLMENT_PAID      installment paid = Σ allocations of payments that are not CANCELLED.
  *  R5  PAYMENT_ALLOCATION    payment amount = Σ its allocations (each allocation belongs to the payer's own plan).
  *  R6  PAYMENT_LEDGER        each payment has exactly one PAYMENT credit = amount; a CANCELLED payment has exactly one
@@ -23,7 +24,14 @@
  *  R11 INVOICE_COVERAGE      each installment has an invoice (warning).
  *  R12 DUE_DATE_POLICY       plans with a recorded policy: due dates follow "anchor day, clamped" at end of day in the
  *                            recorded zone (error if not). Legacy plans (no policy) that deviate are reported as INFO
- *                            only — their dates are intentionally NOT changed.
+ *                            only — their dates are intentionally NOT changed. Installments created by a custom plan
+ *                            (fee adjustment) follow their own approved dates: each must be end of day in the zone.
+ *  R13 ADJUSTMENT_LEDGER     APPLIED waiver ⇔ exactly one WAIVER credit = amount; per plan Σ applied waivers =
+ *                            fee_plans.waived; a custom plan (RESCHEDULE) and non-applied adjustments post nothing;
+ *                            an applied custom plan created installments adding up to its amount.
+ *  R14 CLOSED_ENROLLMENT_BALANCE  unpaid installments on a plan whose enrollment has ended without continuing in the
+ *                            same course: WARNING when CANCELLED or moved to another course (a fee adjustment or new
+ *                            decision is needed); INFO when WITHDRAWN / TERMINATED (refund/fee policy pending).
  */
 import { prisma } from '../lib/prisma';
 import { getSettings } from '../lib/settings';
@@ -51,15 +59,17 @@ export async function reconcile(opts: { studentId?: string } = {}) {
     async (tx) => {
       await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
       const sw = opts.studentId ? { studentId: opts.studentId } : {};
-      const [plans, installments, invoices, payments, allocations, discounts, refunds, ledger] = await Promise.all([
-        tx.feePlan.findMany({ where: sw, select: { id: true, studentId: true, grossAmount: true, discount: true, dueAnchorDay: true, dueTimeZone: true } }),
-        tx.installment.findMany({ where: opts.studentId ? { feePlan: { studentId: opts.studentId } } : {}, select: { id: true, feePlanId: true, seq: true, amount: true, paidAmount: true, status: true, dueDate: true } }),
+      const [plans, installments, invoices, payments, allocations, discounts, refunds, ledger, adjustments, enrollments] = await Promise.all([
+        tx.feePlan.findMany({ where: sw, select: { id: true, studentId: true, grossAmount: true, discount: true, waived: true, dueAnchorDay: true, dueTimeZone: true, enrollmentId: true } }),
+        tx.installment.findMany({ where: opts.studentId ? { feePlan: { studentId: opts.studentId } } : {}, select: { id: true, feePlanId: true, seq: true, amount: true, paidAmount: true, status: true, dueDate: true, adjustmentId: true } }),
         tx.invoice.findMany({ where: sw, select: { installmentId: true } }),
         tx.payment.findMany({ where: sw, select: { id: true, studentId: true, amount: true, status: true, receiptNumber: true } }),
         tx.paymentAllocation.findMany({ where: opts.studentId ? { payment: { studentId: opts.studentId } } : {}, select: { paymentId: true, installmentId: true, amount: true } }),
         tx.discount.findMany({ where: sw, select: { id: true, studentId: true, feePlanId: true, amount: true, status: true } }),
         tx.refund.findMany({ where: sw, select: { id: true, studentId: true, amount: true, status: true } }),
         tx.ledgerEntry.findMany({ where: sw, select: { id: true, studentId: true, type: true, debit: true, credit: true, refType: true, refId: true } }),
+        tx.feeAdjustment.findMany({ where: sw, select: { id: true, studentId: true, feePlanId: true, kind: true, amount: true, status: true } }),
+        tx.enrollment.findMany({ where: sw, select: { id: true, studentId: true, courseId: true, status: true, previousEnrollmentId: true } }),
       ]);
       const issues: Issue[] = [];
       const add = (i: Issue) => issues.push(i);
@@ -78,12 +88,19 @@ export async function reconcile(opts: { studentId?: string } = {}) {
       for (const p of plans) {
         const ins = (instByPlan.get(p.id) ?? []).sort((a, b) => a.seq - b.seq);
         const sum = ins.reduce((s, i) => s + P(i.amount), 0);
-        const exp = P(p.grossAmount) - P(p.discount);
-        if (sum !== exp) add({ rule: 'R2_PLAN_TOTAL', severity: 'ERROR', studentId: p.studentId, entity: 'fee_plan', entityId: p.id, expected: R(exp), actual: R(sum), message: 'Installment total differs from plan gross minus discounts.' });
+        const exp = P(p.grossAmount) - P(p.discount) - P(p.waived);
+        if (sum !== exp) add({ rule: 'R2_PLAN_TOTAL', severity: 'ERROR', studentId: p.studentId, entity: 'fee_plan', entityId: p.id, expected: R(exp), actual: R(sum), message: 'Installment total differs from plan gross minus discounts and waivers.' });
         const fee = (ledgerByRef.get(`fee_plan:${p.id}`) ?? []).filter((e) => e.type === 'FEE');
         if (P(p.grossAmount) > 0 && (fee.length !== 1 || P(fee[0].debit) !== P(p.grossAmount)))
           add({ rule: 'R9_FEE_LEDGER', severity: 'ERROR', studentId: p.studentId, entity: 'fee_plan', entityId: p.id, expected: `1 FEE debit of ${R(P(p.grossAmount))}`, actual: `${fee.length} entr(ies) ${fee.map((e) => R(P(e.debit))).join(', ')}`, message: 'Fee plan is not posted to the ledger exactly once.' });
-        if (ins.length) {
+        const custom = ins.filter((i) => i.adjustmentId);
+        const tz0 = p.dueTimeZone ?? academyTz;
+        const badCustom = custom.filter((i) => endOfDayUtc(toCalendarDate(i.dueDate, tz0), tz0).getTime() !== i.dueDate.getTime());
+        if (badCustom.length)
+          add({ rule: 'R12_DUE_DATE_POLICY', severity: 'ERROR', studentId: p.studentId, entity: 'fee_plan', entityId: p.id, actual: badCustom.map((i) => `#${i.seq} ${i.dueDate.toISOString()}`).join(', '), message: 'Custom-plan due dates are not at the end of the day in the plan time zone.' });
+        const orig = ins.filter((i) => !i.adjustmentId);
+        if (orig.length) {
+          const ins = orig;
           const tz = p.dueTimeZone ?? academyTz;
           const first = toCalendarDate(ins[0].dueDate, tz);
           const anchor = p.dueAnchorDay ?? first.d;
@@ -108,7 +125,7 @@ export async function reconcile(opts: { studentId?: string } = {}) {
         const sid = plan?.studentId ?? null;
         const amt = P(i.amount), paid = P(i.paidAmount);
         if (paid < 0 || paid > amt) add({ rule: 'R3_INSTALLMENT_BOUNDS', severity: 'ERROR', studentId: sid, entity: 'installment', entityId: i.id, expected: `0 … ${R(amt)}`, actual: R(paid), message: 'Paid amount outside 0…installment amount.' });
-        const expStatus = paid >= amt ? 'PAID' : paid === 0 ? 'DUE' : 'PARTIAL';
+        const expStatus = i.status === 'SUPERSEDED' && amt === 0 && paid === 0 ? 'SUPERSEDED' : paid >= amt ? 'PAID' : paid === 0 ? 'DUE' : 'PARTIAL';
         if (i.status !== expStatus) add({ rule: 'R3_INSTALLMENT_STATUS', severity: 'ERROR', studentId: sid, entity: 'installment', entityId: i.id, expected: expStatus, actual: i.status, message: 'Installment status does not match its paid amount.' });
         const alloc = (allocByInst.get(i.id) ?? []).filter((a) => payById.get(a.paymentId)?.status !== 'CANCELLED').reduce((s, a) => s + P(a.amount), 0);
         if (alloc !== paid) add({ rule: 'R4_INSTALLMENT_PAID', severity: 'ERROR', studentId: sid, entity: 'installment', entityId: i.id, expected: R(alloc), actual: R(paid), message: 'Paid amount differs from active payment allocations.' });
@@ -144,6 +161,46 @@ export async function reconcile(opts: { studentId?: string } = {}) {
         if (exp !== P(p.discount)) add({ rule: 'R7_DISCOUNT_LEDGER', severity: 'ERROR', studentId: p.studentId, entity: 'fee_plan', entityId: p.id, expected: R(exp), actual: R(P(p.discount)), message: 'Plan discount total differs from applied discounts.' });
       }
 
+      // R13 — fee adjustments (SRS 22.6)
+      const waivedByPlan = new Map<string, number>();
+      const instByAdj = group(installments.filter((i) => i.adjustmentId), (i) => i.adjustmentId!);
+      for (const a of adjustments) {
+        const ent = ledgerByRef.get(`fee_adjustment:${a.id}`) ?? [];
+        const applied = a.status === 'APPLIED';
+        const isWaiver = a.kind === 'WAIVER';
+        if (applied && isWaiver) waivedByPlan.set(a.feePlanId, (waivedByPlan.get(a.feePlanId) ?? 0) + P(a.amount));
+        const want = applied && isWaiver;
+        if (want ? ent.length !== 1 || ent[0].type !== 'WAIVER' || P(ent[0].credit) !== P(a.amount) : ent.length !== 0)
+          add({ rule: 'R13_ADJUSTMENT_LEDGER', severity: 'ERROR', studentId: a.studentId, entity: 'fee_adjustment', entityId: a.id, expected: want ? `1 WAIVER credit of ${R(P(a.amount))}` : '0 entries', actual: `${ent.length}`, message: `Fee adjustment (${a.kind}, ${a.status}) ledger entries do not match.` });
+        const created = instByAdj.get(a.id) ?? [];
+        if (applied && !isWaiver && created.length === 0)
+          add({ rule: 'R13_ADJUSTMENT_LEDGER', severity: 'ERROR', studentId: a.studentId, entity: 'fee_adjustment', entityId: a.id, message: 'Applied custom plan created no installments.' });
+        if (!(applied && !isWaiver) && created.length)
+          add({ rule: 'R13_ADJUSTMENT_LEDGER', severity: 'ERROR', studentId: a.studentId, entity: 'fee_adjustment', entityId: a.id, message: 'Installments reference an adjustment that is not an applied custom plan.' });
+      }
+      for (const p of plans) {
+        const exp = waivedByPlan.get(p.id) ?? 0;
+        if (exp !== P(p.waived)) add({ rule: 'R13_ADJUSTMENT_LEDGER', severity: 'ERROR', studentId: p.studentId, entity: 'fee_plan', entityId: p.id, expected: R(exp), actual: R(P(p.waived)), message: 'Plan waiver total differs from applied waivers.' });
+      }
+
+      // R14 — unpaid balance left on an enrollment that has ended (not continued in the same course)
+      const enrById = new Map(enrollments.map((e) => [e.id, e]));
+      const successor = new Map(enrollments.filter((e) => e.previousEnrollmentId).map((e) => [e.previousEnrollmentId!, e]));
+      for (const p of plans) {
+        if (!p.enrollmentId) continue;
+        let e = enrById.get(p.enrollmentId);
+        for (let n = 0; e && e.status === 'TRANSFERRED' && n < 100; n++) {
+          const next = successor.get(e.id);
+          if (!next || next.courseId !== e.courseId) break;
+          e = next;
+        }
+        if (!e || ['ACTIVE', 'ON_HOLD', 'COMPLETED'].includes(e.status)) continue;
+        const openAmt = (instByPlan.get(p.id) ?? []).reduce((s, i) => s + P(i.amount) - P(i.paidAmount), 0);
+        if (openAmt <= 0) continue;
+        const warn = e.status === 'CANCELLED' || e.status === 'TRANSFERRED';
+        add({ rule: 'R14_CLOSED_ENROLLMENT_BALANCE', severity: warn ? 'WARNING' : 'INFO', studentId: p.studentId, entity: 'fee_plan', entityId: p.id, actual: `${R(openAmt)} unpaid; enrollment ${e.status.toLowerCase()}`, message: warn ? 'Unpaid installments remain on an enrollment that was cancelled or moved to another course: request a fee adjustment (22.6) or confirm the amount is still owed.' : 'Unpaid installments remain after withdrawal/termination: review per the fee/refund policy.' });
+      }
+
       // R8 — refunds
       const activePaid = new Map<string, number>();
       for (const p of payments) if (p.status !== 'CANCELLED') activePaid.set(p.studentId, (activePaid.get(p.studentId) ?? 0) + P(p.amount));
@@ -161,6 +218,7 @@ export async function reconcile(opts: { studentId?: string } = {}) {
       const sources: Record<string, Map<string, { studentId: string }>> = {
         fee_plan: planById as any, payment: payById as any,
         discount: new Map(discounts.map((d) => [d.id, d])), refund: new Map(refunds.map((r) => [r.id, r])),
+        fee_adjustment: new Map(adjustments.map((a) => [a.id, a])),
       };
       for (const e of ledger) {
         const src = e.refType ? sources[e.refType]?.get(e.refId ?? '') : undefined;
@@ -194,7 +252,7 @@ export async function reconcile(opts: { studentId?: string } = {}) {
         generatedAt: new Date().toISOString(),
         timeZone: academyTz,
         scope: opts.studentId ? { studentId: opts.studentId } : 'all',
-        checked: { students: studentIds.size, plans: plans.length, installments: installments.length, payments: payments.length, discounts: discounts.length, refunds: refunds.length, ledgerEntries: ledger.length },
+        checked: { students: studentIds.size, plans: plans.length, installments: installments.length, payments: payments.length, discounts: discounts.length, refunds: refunds.length, adjustments: adjustments.length, ledgerEntries: ledger.length },
         ok: bySeverity.ERROR === 0,
         bySeverity,
         byRule,

@@ -3,6 +3,7 @@ import { registerApprovalHandler } from './approvals';
 import { admitApplication } from './admissions';
 import { transferEnrollment } from './enrollments';
 import { applyDiscount, cancelPayment } from './finance';
+import { applyFeeAdjustment, rejectFeeAdjustment } from './feeAdjustments';
 import { getSettings } from '../lib/settings';
 import { notifyLater } from './notify';
 import { computeResult } from './exams';
@@ -55,6 +56,12 @@ export function registerHandlers() {
     onReject: async (tx, r) => {
       await tx.payment.update({ where: { id: r.entityId }, data: { status: 'POSTED' } });
     },
+  });
+
+  // SRS 22.6: waivers and custom installment plans, applied only after approval (re-validated at that moment).
+  registerApprovalHandler('FEE_ADJUSTMENT', {
+    onApprove: (tx, r, actor) => applyFeeAdjustment(tx, r.entityId, actor),
+    onReject: (tx, r) => rejectFeeAdjustment(tx, r.entityId),
   });
 
   registerApprovalHandler('BATCH_TRANSFER', {

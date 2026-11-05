@@ -64,6 +64,8 @@ export async function seedReference(prisma: PrismaClient) {
     ['DISCOUNT', 'Fee discount / scholarship', [{ level: 1, role: 'finance_manager' }, { level: 2, role: 'management', minAmount: 10000 }]],
     ['REFUND', 'Refund', [{ level: 1, role: 'finance_manager' }, { level: 2, role: 'management', minAmount: 5000 }]],
     ['PAYMENT_CANCELLATION', 'Payment / receipt cancellation', [{ level: 1, role: 'finance_manager' }]],
+    // SRS 22.6: waivers and custom installment plans. Management threshold is a placeholder pending the Finance decision.
+    ['FEE_ADJUSTMENT', 'Fee adjustment (waiver / custom installment plan)', [{ level: 1, role: 'finance_manager' }, { level: 2, role: 'management', minAmount: 10000 }]],
     ['BATCH_TRANSFER', 'Batch transfer / course change', [{ level: 1, role: 'academic_manager' }]],
     ['RESULT_CORRECTION', 'Result correction', [{ level: 1, role: 'exam_officer' }, { level: 2, role: 'academic_manager' }]],
     ['CERTIFICATE', 'Certificate issue', [{ level: 1, role: 'exam_officer' }]],

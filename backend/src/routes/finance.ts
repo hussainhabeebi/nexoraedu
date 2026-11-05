@@ -11,7 +11,8 @@ import { money, toCsv } from '../lib/util';
 import { dayDiff, formatDate, toCalendarDate } from '../lib/caldate';
 import { reconcile } from '../services/reconciliation';
 import { createApproval } from '../services/approvals';
-import { createFeePlan, ledger, recordPayment, studentBalance } from '../services/finance';
+import { ACTIVE_REFUND_STATUSES, assertCancellationKeepsRefundsCovered, createFeePlan, ledger, lockStudentAccount, recordPayment, studentBalance } from '../services/finance';
+import { feeEnrollmentChain, requestFeeAdjustment } from '../services/feeAdjustments';
 import { notifyLater } from '../services/notify';
 
 const r = Router();
@@ -19,18 +20,20 @@ const r = Router();
 r.get('/students/:id/account', can('finance:read'), ah(async (req, res) => {
   const st = await prisma.student.findUnique({ where: { id: req.params.id }, include: { course: true, batch: true } });
   if (!st) throw notFound('Student not found');
-  const [plans, invoices, payments, entries, discounts, refunds, balance] = await Promise.all([
-    prisma.feePlan.findMany({ where: { studentId: st.id }, include: { installments: { orderBy: { seq: 'asc' } } } }),
+  const [plans, invoices, payments, entries, discounts, refunds, balance, adjustments] = await Promise.all([
+    // Newest plan first (after a course change the current enrollment's plan is the latest one).
+    prisma.feePlan.findMany({ where: { studentId: st.id }, orderBy: { createdAt: 'desc' }, include: { installments: { orderBy: { seq: 'asc' } }, enrollment: { select: { id: true, status: true, startDate: true, endedAt: true, course: { select: { name: true } }, batch: { select: { code: true } } } } } }),
     prisma.invoice.findMany({ where: { studentId: st.id }, orderBy: { number: 'asc' } }),
     prisma.payment.findMany({ where: { studentId: st.id }, orderBy: { paidAt: 'desc' }, include: { allocations: true } }),
     prisma.ledgerEntry.findMany({ where: { studentId: st.id }, orderBy: { createdAt: 'asc' } }),
     prisma.discount.findMany({ where: { studentId: st.id }, orderBy: { createdAt: 'desc' } }),
     prisma.refund.findMany({ where: { studentId: st.id }, orderBy: { createdAt: 'desc' } }),
     studentBalance(st.id),
+    prisma.feeAdjustment.findMany({ where: { studentId: st.id }, orderBy: { createdAt: 'desc' } }),
   ]);
   let run = 0;
   const ledgerRows = entries.map((e) => ((run = money(run + Number(e.debit) - Number(e.credit))), { ...e, balance: run }));
-  res.json({ student: st, plans, invoices, payments, ledger: ledgerRows, discounts, refunds, balance });
+  res.json({ student: st, plans, invoices, payments, ledger: ledgerRows, discounts, refunds, adjustments, balance });
 }));
 
 r.post('/students/:id/fee-plan', can('finance:manage'), ah(async (req, res) => {
@@ -39,8 +42,10 @@ r.post('/students/:id/fee-plan', can('finance:manage'), ah(async (req, res) => {
   const st = await prisma.student.findUniqueOrThrow({ where: { id: req.params.id } });
   const enrollment = await prisma.enrollment.findFirst({ where: { studentId: st.id, courseId: st.courseId, status: { in: ['ACTIVE', 'ON_HOLD'] } } });
   if (!enrollment) throw badRequest('The student has no current enrollment in this course.');
-  // One plan per enrollment (a course change opens a new enrollment, which may then get its own plan).
-  const existing = await prisma.feePlan.count({ where: { studentId: st.id, OR: [{ enrollmentId: enrollment.id }, { enrollmentId: null, courseId: st.courseId }] } });
+  // One plan per course enrollment. A batch transfer within the same course continues the same course (and its
+  // plan, which stays on the earlier enrollment in the chain); only a course change may get a new plan.
+  const chain = await feeEnrollmentChain(prisma as any, enrollment.id);
+  const existing = await prisma.feePlan.count({ where: { studentId: st.id, OR: [{ enrollmentId: { in: chain } }, { enrollmentId: null, courseId: st.courseId }] } });
   if (existing) throw badRequest('A fee plan already exists for this enrollment. Use discounts or adjustments instead.');
   const plan = await prisma.$transaction(async (tx) => {
     const plan = await createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments, startDate, userId: req.user!.id });
@@ -138,6 +143,8 @@ r.post('/payments/:id/cancel-request', can('finance:collect'), ah(async (req, re
   const p = await prisma.payment.findUniqueOrThrow({ where: { id: req.params.id }, include: { student: true } });
   if (p.status !== 'POSTED') throw badRequest(`Payment is already ${p.status.toLowerCase().replace('_', ' ')}.`);
   const a = await prisma.$transaction(async (tx) => {
+    await lockStudentAccount(tx, p.studentId);
+    await assertCancellationKeepsRefundsCovered(tx, p); // B1: refunds must stay covered by the remaining receipts
     const moved = await tx.payment.updateMany({ where: { id: p.id, status: 'POSTED' }, data: { status: 'CANCEL_REQUESTED' } });
     if (moved.count !== 1) throw badRequest('This payment already has a cancellation request.');
     const a = await createApproval(tx, { type: 'PAYMENT_CANCELLATION', entityType: 'payment', entityId: p.id, title: `Cancel receipt ${p.receiptNumber} — ${p.student.fullName} (${money(p.amount)})`, payload: { reason }, amount: Number(p.amount), requestedById: req.user!.id });
@@ -170,15 +177,37 @@ r.post('/discounts', can('finance:collect', 'finance:manage'), ah(async (req, re
   res.status(201).json(result);
 }));
 
+// SRS 22.6 / FIN-03 fee adjustments: waiver or custom installment plan — always through the approval workflow.
+const scheduleRow = z.object({ dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), amount: z.coerce.number().positive() });
+r.post('/adjustments', can('finance:collect', 'finance:manage'), ah(async (req, res) => {
+  const d = z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('WAIVER'), studentId: z.string(), feePlanId: z.string(), amount: z.coerce.number().positive(), reason: z.string().trim().min(5).max(500) }),
+    z.object({ kind: z.literal('RESCHEDULE'), studentId: z.string(), feePlanId: z.string(), schedule: z.array(scheduleRow).min(1).max(24), reason: z.string().trim().min(5).max(500) }),
+  ]).parse(req.body);
+  const out = await prisma.$transaction(async (tx) => {
+    const out = await requestFeeAdjustment(tx, { ...d, requestedById: req.user!.id });
+    await audit(tx, req, 'CREATE', 'fee_adjustment', out.adjustment.id, null, { ...d, amount: Number(out.adjustment.amount), approvalId: out.approval.id });
+    return out;
+  });
+  res.status(201).json(out);
+}));
+r.get('/adjustments', can('finance:read'), ah(async (req, res) => {
+  const where: any = { ...(req.query.studentId && { studentId: String(req.query.studentId) }), ...(req.query.status && { status: String(req.query.status) }) };
+  const items = await prisma.feeAdjustment.findMany({ where, orderBy: { createdAt: 'desc' }, take: 200, include: { student: { select: { id: true, fullName: true, studentCode: true } } } });
+  res.json({ items });
+}));
+
 // FIN-11 refunds
 r.post('/refunds', can('finance:collect', 'finance:manage'), ah(async (req, res) => {
   const d = z.object({ studentId: z.string(), amount: z.coerce.number().positive(), reason: z.string().min(5) }).parse(req.body);
-  const paid = await prisma.payment.aggregate({ where: { studentId: d.studentId, status: 'POSTED' }, _sum: { amount: true } });
-  const refunded = await prisma.refund.aggregate({ where: { studentId: d.studentId, status: { in: ['APPROVED', 'PAID', 'PENDING_APPROVAL'] } }, _sum: { amount: true } });
-  const max = money(Number(paid._sum.amount ?? 0) - Number(refunded._sum.amount ?? 0));
-  if (d.amount > max) throw badRequest(`Refund cannot exceed the refundable amount (${max}).`);
   const st = await prisma.student.findUniqueOrThrow({ where: { id: d.studentId } });
   const out = await prisma.$transaction(async (tx) => {
+    // Same lock as receipt cancellation (B1), so a refund and a cancellation cannot both pass the checks at once.
+    await lockStudentAccount(tx, d.studentId);
+    const paid = await tx.payment.aggregate({ where: { studentId: d.studentId, status: 'POSTED' }, _sum: { amount: true } });
+    const refunded = await tx.refund.aggregate({ where: { studentId: d.studentId, status: { in: ACTIVE_REFUND_STATUSES } }, _sum: { amount: true } });
+    const max = money(Number(paid._sum.amount ?? 0) - Number(refunded._sum.amount ?? 0));
+    if (d.amount > max) throw badRequest(`Refund cannot exceed the refundable amount (${max}).`);
     const rf = await tx.refund.create({ data: { ...d, requestedById: req.user!.id } });
     const a = await createApproval(tx, { type: 'REFUND', entityType: 'refund', entityId: rf.id, title: `Refund ${money(d.amount)} to ${st.fullName}: ${d.reason}`, payload: d, amount: d.amount, requestedById: req.user!.id });
     await audit(tx, req, 'CREATE', 'refund', rf.id, null, { ...d, approvalId: a.id });
@@ -212,7 +241,7 @@ r.get('/outstanding', can('finance:read'), ah(async (req, res) => {
   const tz = (await getSettings()).academy.timeZone;
   const todayCal = toCalendarDate(new Date(), tz);
   const insts = await prisma.installment.findMany({
-    where: { status: { not: 'PAID' }, feePlan: { student: { status: { notIn: ['WITHDRAWN', 'TERMINATED'] }, ...(req.query.courseId && { courseId: String(req.query.courseId) }), ...(req.query.batchId && { batchId: String(req.query.batchId) }) } } },
+    where: { status: { in: ['DUE', 'PARTIAL'] }, feePlan: { student: { status: { notIn: ['WITHDRAWN', 'TERMINATED'] }, ...(req.query.courseId && { courseId: String(req.query.courseId) }), ...(req.query.batchId && { batchId: String(req.query.batchId) }) } } },
     include: { feePlan: { include: { student: { select: { id: true, fullName: true, studentCode: true, phone: true, batch: { select: { code: true } }, course: { select: { name: true } } } } } } },
     orderBy: { dueDate: 'asc' },
   });

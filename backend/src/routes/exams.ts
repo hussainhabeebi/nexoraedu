@@ -181,7 +181,7 @@ async function eligibility(studentId: string) {
   const s = await getSettings();
   const reasons: string[] = [];
   if (s.exams.requireFeesCleared) {
-    const overdue = await prisma.installment.findFirst({ where: { feePlan: { studentId }, status: { not: 'PAID' }, dueDate: { lt: new Date() } } });
+    const overdue = await prisma.installment.findFirst({ where: { feePlan: { studentId }, status: { in: ['DUE', 'PARTIAL'] }, dueDate: { lt: new Date() } } });
     if (overdue) reasons.push('Overdue fees');
   }
   if (s.exams.minAttendanceForExam > 0) {

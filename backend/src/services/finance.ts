@@ -9,6 +9,10 @@ import { addMonthsClamped, endOfDayUtc, parseIsoDate, toCalendarDate, type Calen
 
 type Tx = Prisma.TransactionClient;
 
+/** Installments that still carry an unpaid amount. SUPERSEDED ones (replaced by a custom plan) and PAID ones never do. */
+export const OPEN_INSTALLMENT_STATUSES = ['DUE', 'PARTIAL'];
+export const openInstallment = { in: OPEN_INSTALLMENT_STATUSES };
+
 export async function ledger(tx: Tx, e: { studentId: string; type: string; debit?: number; credit?: number; refType?: string; refId?: string; narration: string; userId?: string }) {
   return tx.ledgerEntry.create({ data: { ...e, debit: e.debit ?? 0, credit: e.credit ?? 0 } });
 }
@@ -76,7 +80,7 @@ export async function createFeePlan(tx: Tx, p: { studentId: string; courseId: st
 }
 
 export async function outstandingInstallments(tx: Tx, studentId: string) {
-  return tx.installment.findMany({ where: { feePlan: { studentId }, status: { not: 'PAID' } }, orderBy: [{ dueDate: 'asc' }, { seq: 'asc' }] });
+  return tx.installment.findMany({ where: { feePlan: { studentId }, status: openInstallment }, orderBy: [{ dueDate: 'asc' }, { seq: 'asc' }] });
 }
 
 /** FIN-05/06: record a payment, allocate FIFO to installments, post ledger, issue receipt number. */
@@ -119,12 +123,32 @@ export async function recordPayment(
   return payment;
 }
 
+/** Refunds that still count against money received (R8): requested, approved or paid. */
+export const ACTIVE_REFUND_STATUSES = ['PENDING_APPROVAL', 'APPROVED', 'PAID'];
+
+/**
+ * B1 / R8 (FIN-06, FIN-11, 22.5): a receipt may be cancelled only if the refunds that are pending, approved or paid
+ * stay covered by the receipts that remain. Call with the student account locked.
+ */
+export async function assertCancellationKeepsRefundsCovered(tx: Tx, pay: { id: string; studentId: string; receiptNumber: string }) {
+  const [remaining, refunds] = await Promise.all([
+    tx.payment.aggregate({ where: { studentId: pay.studentId, id: { not: pay.id }, status: { not: 'CANCELLED' } }, _sum: { amount: true } }),
+    tx.refund.aggregate({ where: { studentId: pay.studentId, status: { in: ACTIVE_REFUND_STATUSES } }, _sum: { amount: true } }),
+  ]);
+  const left = money(Number(remaining._sum.amount ?? 0));
+  const refunded = money(Number(refunds._sum.amount ?? 0));
+  if (refunded > left + 0.001)
+    throw conflict(`Receipt ${pay.receiptNumber} cannot be cancelled: refunds of ${refunded.toFixed(2)} (pending, approved or paid) would exceed the ${left.toFixed(2)} left in other receipts. Resolve the refund first.`, { refunds: refunded, remainingReceipts: left });
+}
+
 /** Executed after PAYMENT_CANCELLATION approval: reverse allocations + reversing ledger entry. */
 export async function cancelPayment(tx: Tx, paymentId: string, userId: string) {
   const pay = await tx.payment.findUnique({ where: { id: paymentId }, include: { allocations: true } });
   if (!pay) throw notFound('Payment not found');
   await lockStudentAccount(tx, pay.studentId);
   if (pay.status === 'CANCELLED') return;
+  // Re-checked at approval time: a refund may have been recorded since the request (nothing changes if refused).
+  await assertCancellationKeepsRefundsCovered(tx, pay);
   for (const a of pay.allocations) {
     const i = await tx.installment.findUniqueOrThrow({ where: { id: a.installmentId } });
     const paid = money(Number(i.paidAmount) - Number(a.amount));

@@ -29,7 +29,7 @@ r.get('/me', ah(async (req, res) => {
     studentAttendancePct(s.id),
     studentBalance(s.id),
     s.batchId ? prisma.timetableSession.findMany({ where: { batchId: s.batchId, published: true, cancelled: false, startsAt: { gte: now } }, orderBy: { startsAt: 'asc' }, take: 5 }) : [],
-    prisma.installment.findFirst({ where: { feePlan: { studentId: s.id }, status: { not: 'PAID' } }, orderBy: { dueDate: 'asc' } }),
+    prisma.installment.findFirst({ where: { feePlan: { studentId: s.id }, status: { in: ['DUE', 'PARTIAL'] } }, orderBy: { dueDate: 'asc' } }),
     prisma.result.findMany({ where: { studentId: s.id, exam: { resultsPublished: true } }, include: { exam: { select: { title: true, totalMarks: true, type: true } } }, orderBy: { createdAt: 'desc' }, take: 5 }),
     prisma.examAssignment.findMany({ where: { studentId: s.id, exam: { status: 'SCHEDULED', endAt: { gte: now } } }, include: { exam: { select: { id: true, title: true, startAt: true, endAt: true, durationMin: true, mode: true } } } }),
     prisma.notification.count({ where: { userId: req.user!.id, readAt: null } }),

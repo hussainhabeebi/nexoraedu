@@ -46,7 +46,15 @@ describe('refunds', () => {
 
 describe('payment cancellation', () => {
   it('rejection restores the payment; a second cancellation request is refused while one is pending', async () => {
-    const pay = await prisma.payment.findFirstOrThrow({ where: { studentId } });
+    // The shared student had a ₹6,000 refund paid out of this receipt above, so cancelling it is refused (B1).
+    const refunded = await prisma.payment.findFirstOrThrow({ where: { studentId } });
+    expect((await request(app).post(`/api/v1/finance/payments/${refunded.id}/cancel-request`).set(as(accounts)).send({ reason: 'Refunded already' })).status).toBe(409);
+    // Own synthetic student and receipt for the rejection flow.
+    const st = await makeStudent({});
+    const pay = await prisma.$transaction(async (tx) => {
+      await createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 1 });
+      return recordPayment(tx, { studentId: st.id, amount: 8000, mode: 'CASH' });
+    });
     const c1 = await request(app).post(`/api/v1/finance/payments/${pay.id}/cancel-request`).set(as(accounts)).send({ reason: 'Wrong student selected' });
     expect(c1.status).toBe(200);
     expect((await request(app).post(`/api/v1/finance/payments/${pay.id}/cancel-request`).set(as(accounts)).send({ reason: 'Again please' })).status).toBe(400);

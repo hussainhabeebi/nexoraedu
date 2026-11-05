@@ -17,7 +17,7 @@ export async function runFeeReminders(force = false) {
   const today = zonedTimeToUtc(todayCal, tz); // start of today in the academy zone (once-per-day guard)
   const offsets = [...s.finance.reminderDaysBefore.map((d) => -d), 0, ...s.finance.reminderDaysAfter];
   const insts = await prisma.installment.findMany({
-    where: { status: { not: 'PAID' }, dueDate: { gte: new Date(today.getTime() - 120 * DAY), lte: new Date(today.getTime() + 30 * DAY) }, ...(force ? {} : { OR: [{ lastReminderAt: null }, { lastReminderAt: { lt: today } }] }) },
+    where: { status: { in: ['DUE', 'PARTIAL'] }, dueDate: { gte: new Date(today.getTime() - 120 * DAY), lte: new Date(today.getTime() + 30 * DAY) }, ...(force ? {} : { OR: [{ lastReminderAt: null }, { lastReminderAt: { lt: today } }] }) },
     include: { feePlan: { include: { student: { include: { lead: true } } } } },
   });
   let sent = 0;
