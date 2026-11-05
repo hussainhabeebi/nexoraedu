@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
+import { batchScopeIds, facultyBatchIds } from '../lib/policy';
 import { ah, badRequest, conflict, forbidden, notFound } from '../lib/http';
 import { can, userCan } from '../lib/auth';
 import { audit } from '../lib/audit';
@@ -50,8 +51,11 @@ r.get('/courses/:id', can('academics:read', 'masters:manage', 'leads:read', 'stu
 
 r.post('/courses', can('masters:manage', 'academics:manage'), ah(async (req, res) => {
   const { feeComponents, ...d } = courseSchema.parse(req.body);
-  const c = await prisma.course.create({ data: { ...d, code: d.code.toUpperCase(), slug: slugify(d.name), feeComponents: feeComponents ? { create: feeComponents } : undefined } });
-  await audit(req, 'CREATE', 'course', c.id, null, req.body);
+  const c = await prisma.$transaction(async (tx) => {
+    const c = await tx.course.create({ data: { ...d, code: d.code.toUpperCase(), slug: slugify(d.name), feeComponents: feeComponents ? { create: feeComponents } : undefined } });
+    await audit(tx, req, 'CREATE', 'course', c.id, null, { ...d, feeComponents });
+    return c;
+  });
   res.status(201).json(c);
 }));
 
@@ -65,17 +69,20 @@ r.patch('/courses/:id', can('masters:manage', 'academics:manage'), ah(async (req
       await tx.feeComponent.updateMany({ where: { courseId: c.id, isActive: true }, data: { isActive: false } });
       await tx.feeComponent.createMany({ data: feeComponents.map((f) => ({ ...f, courseId: c.id })) });
     }
+    await audit(tx, req, 'UPDATE', 'course', c.id, before, { ...d, feeComponents });
     return c;
   });
-  await audit(req, 'UPDATE', 'course', c.id, before, req.body);
   res.json(c);
 }));
 
 // ── Subjects & modules (ACD-01/02) ──
 r.post('/courses/:id/subjects', can('academics:manage', 'masters:manage'), ah(async (req, res) => {
   const d = z.object({ code: z.string(), name: z.string(), sequence: z.number().int().default(1), hours: z.number().int().default(0), credits: z.number().int().optional() }).parse(req.body);
-  const s = await prisma.subject.create({ data: { ...d, courseId: req.params.id } });
-  await audit(req, 'CREATE', 'subject', s.id, null, d);
+  const s = await prisma.$transaction(async (tx) => {
+    const s = await tx.subject.create({ data: { ...d, courseId: req.params.id } });
+    await audit(tx, req, 'CREATE', 'subject', s.id, null, { ...d, courseId: req.params.id });
+    return s;
+  });
   res.status(201).json(s);
 }));
 r.patch('/subjects/:id', can('academics:manage', 'masters:manage'), ah(async (req, res) => {
@@ -104,13 +111,6 @@ const batchSchema = z.object({
   status: z.enum(['PLANNED', 'RUNNING', 'COMPLETED', 'CANCELLED']).default('PLANNED'),
 });
 
-async function facultyBatchIds(userId: string) {
-  const [alloc, sessions] = await Promise.all([
-    prisma.facultyAllocation.findMany({ where: { facultyId: userId }, select: { batchId: true } }),
-    prisma.timetableSession.findMany({ where: { facultyId: userId }, select: { batchId: true }, distinct: ['batchId'] }),
-  ]);
-  return [...new Set([...alloc, ...sessions].map((x) => x.batchId))];
-}
 export { facultyBatchIds };
 
 r.get('/batches', can('academics:read', 'leads:read', 'students:read', 'finance:read', 'exams:read'), ah(async (req, res) => {
@@ -144,16 +144,22 @@ r.get('/batches/:id', can('academics:read', 'students:read'), ah(async (req, res
 
 r.post('/batches', can('academics:manage'), ah(async (req, res) => {
   const d = batchSchema.parse(req.body);
-  const b = await prisma.batch.create({ data: { ...d, code: d.code.toUpperCase() } });
-  await audit(req, 'CREATE', 'batch', b.id, null, d);
+  const b = await prisma.$transaction(async (tx) => {
+    const b = await tx.batch.create({ data: { ...d, code: d.code.toUpperCase() } });
+    await audit(tx, req, 'CREATE', 'batch', b.id, null, d);
+    return b;
+  });
   res.status(201).json(b);
 }));
 r.patch('/batches/:id', can('academics:manage'), ah(async (req, res) => {
   const d = batchSchema.partial().parse(req.body);
   const before = await prisma.batch.findUniqueOrThrow({ where: { id: req.params.id } });
-  const b = await prisma.batch.update({ where: { id: req.params.id }, data: d });
-  if (d.status === 'RUNNING' && before.status !== 'RUNNING') await prisma.student.updateMany({ where: { batchId: b.id, status: 'ADMITTED' }, data: { status: 'ACTIVE' } });
-  await audit(req, 'UPDATE', 'batch', b.id, before, d);
+  const b = await prisma.$transaction(async (tx) => {
+    const b = await tx.batch.update({ where: { id: req.params.id }, data: d });
+    if (d.status === 'RUNNING' && before.status !== 'RUNNING') await tx.student.updateMany({ where: { batchId: b.id, status: 'ADMITTED' }, data: { status: 'ACTIVE' } });
+    await audit(tx, req, 'UPDATE', 'batch', b.id, before, d);
+    return b;
+  });
   res.json(b);
 }));
 
@@ -178,12 +184,19 @@ r.put('/faculty/:userId', can('academics:manage'), ah(async (req, res) => {
 }));
 r.post('/batches/:id/allocations', can('academics:manage'), ah(async (req, res) => {
   const d = z.object({ subjectId: z.string(), facultyId: z.string() }).parse(req.body);
-  const a = await prisma.facultyAllocation.create({ data: { batchId: req.params.id, ...d } });
-  await audit(req, 'CREATE', 'faculty_allocation', a.id, null, d);
+  const a = await prisma.$transaction(async (tx) => {
+    const a = await tx.facultyAllocation.create({ data: { batchId: req.params.id, ...d } });
+    await audit(tx, req, 'CREATE', 'faculty_allocation', a.id, null, { batchId: req.params.id, ...d });
+    return a;
+  });
   res.status(201).json(a);
 }));
 r.delete('/allocations/:id', can('academics:manage'), ah(async (req, res) => {
-  await prisma.facultyAllocation.delete({ where: { id: req.params.id } });
+  await prisma.$transaction(async (tx) => {
+    const a = await tx.facultyAllocation.findUniqueOrThrow({ where: { id: req.params.id } });
+    await tx.facultyAllocation.delete({ where: { id: a.id } });
+    await audit(tx, req, 'DELETE', 'faculty_allocation', a.id, a, null);
+  });
   res.json({ ok: true });
 }));
 
@@ -225,15 +238,19 @@ r.get('/timetable', can('academics:read', 'attendance:mark'), ah(async (req, res
 r.post('/timetable', can('academics:manage'), ah(async (req, res) => {
   const { repeatWeeks, ...d } = sessionSchema.parse(req.body);
   if (d.endsAt <= d.startsAt) throw badRequest('End time must be after start time.');
-  const created = [];
+  const created: (typeof d)[] = [];
   for (let w = 0; w < repeatWeeks; w++) {
     const s = { ...d, startsAt: new Date(d.startsAt.getTime() + w * 7 * 864e5), endsAt: new Date(d.endsAt.getTime() + w * 7 * 864e5) };
     const clash = await findClash(s);
     if (clash) throw conflict(`Clash on ${s.startsAt.toDateString()}: overlaps with ${clash.batch.code} session ${clash.startsAt.toLocaleTimeString()}–${clash.endsAt.toLocaleTimeString()} (same batch, faculty or room).`);
     created.push(s);
   }
-  const rows = await prisma.$transaction(created.map((s) => prisma.timetableSession.create({ data: s })));
-  await audit(req, 'CREATE', 'timetable_session', rows[0]?.id, null, { ...d, repeatWeeks });
+  const rows = await prisma.$transaction(async (tx) => {
+    const rows = [];
+    for (const s of created) rows.push(await tx.timetableSession.create({ data: s }));
+    await audit(tx, req, 'CREATE', 'timetable_session', rows[0]?.id, null, { ...d, repeatWeeks, ids: rows.map((x) => x.id) });
+    return rows;
+  });
   res.status(201).json({ items: rows });
 }));
 
@@ -245,16 +262,22 @@ r.patch('/timetable/:id', can('academics:manage'), ah(async (req, res) => {
     const clash = await findClash(merged, before.id);
     if (clash) throw conflict(`This change clashes with ${clash.batch.code} at ${clash.startsAt.toLocaleString()}.`);
   }
-  const s = await prisma.timetableSession.update({ where: { id: req.params.id }, data: d });
-  await audit(req, 'UPDATE', 'timetable_session', s.id, before, d);
+  const s = await prisma.$transaction(async (tx) => {
+    const s = await tx.timetableSession.update({ where: { id: req.params.id }, data: d });
+    await audit(tx, req, 'UPDATE', 'timetable_session', s.id, before, d);
+    return s;
+  });
   if (before.published) notifyBatch(s.batchId, 'timetable.changed', { title: s.title ?? 'Class', when: s.startsAt.toLocaleString('en-IN'), status: s.cancelled ? 'cancelled' : 'rescheduled' });
   res.json(s);
 }));
 
 r.post('/timetable/publish', can('academics:manage'), ah(async (req, res) => {
   const { batchId, from, to } = z.object({ batchId: z.string(), from: z.coerce.date(), to: z.coerce.date() }).parse(req.body);
-  const u = await prisma.timetableSession.updateMany({ where: { batchId, startsAt: { gte: from, lt: to }, published: false }, data: { published: true } });
-  await audit(req, 'PUBLISH', 'timetable', batchId, null, { from, to, count: u.count });
+  const u = await prisma.$transaction(async (tx) => {
+    const u = await tx.timetableSession.updateMany({ where: { batchId, startsAt: { gte: from, lt: to }, published: false }, data: { published: true } });
+    await audit(tx, req, 'PUBLISH', 'timetable', batchId, null, { from, to, count: u.count });
+    return u;
+  });
   notifyBatch(batchId, 'timetable.published', { from: from.toDateString(), to: to.toDateString() });
   res.json({ published: u.count });
 }));
@@ -267,7 +290,8 @@ async function notifyBatch(batchId: string, key: string, vars: Record<string, un
 // ── Attendance (ACD-07/08) ──
 r.get('/sessions/:id/attendance', can('attendance:mark', 'academics:read'), ah(async (req, res) => {
   const s = await prisma.timetableSession.findUnique({ where: { id: req.params.id }, include: { batch: true, attendance: true } });
-  if (!s) throw notFound();
+  const scope = await batchScopeIds(req.user!);
+  if (!s || (scope && !scope.includes(s.batchId) && s.facultyId !== req.user!.id)) throw notFound(); // DSH-09 faculty: own batches
   const students = await prisma.student.findMany({ where: { batchId: s.batchId, status: { in: ['ADMITTED', 'ACTIVE', 'ON_HOLD'] } }, orderBy: { fullName: 'asc' }, select: { id: true, studentCode: true, fullName: true, photoUrl: true } });
   const m = Object.fromEntries(s.attendance.map((a) => [a.studentId, a.status]));
   res.json({ session: s, students: students.map((st) => ({ ...st, status: m[st.id] ?? null })) });
@@ -279,24 +303,31 @@ r.post('/sessions/:id/attendance', can('attendance:mark'), ah(async (req, res) =
   if (!userCan(req, 'academics:manage') && s.facultyId && s.facultyId !== req.user!.id) throw forbidden('You can only mark attendance for your own sessions.');
   if (s.startsAt > new Date(Date.now() + 15 * 60_000)) throw badRequest('Attendance can be marked only once the session has started.');
   const st = await getSettings();
+  // Only students enrolled in this session's batch can be marked (object-level check).
+  const enrolled = await prisma.student.count({ where: { id: { in: records.map((x) => x.studentId) }, batchId: s.batchId } });
+  if (enrolled !== new Set(records.map((x) => x.studentId)).size) throw badRequest('Some students are not in this batch.');
   const windowClosed = Date.now() > s.endsAt.getTime() + st.academics.attendanceEditWindowHours * 3600_000;
-  if (windowClosed && !req.user!.roles.includes('super_admin')) {
-    // ACD-07: later edits need approval
-    const reqs = await prisma.$transaction(async (tx) =>
-      Promise.all(records.map((rec) => createApproval(tx, { type: 'ATTENDANCE_EDIT', entityType: 'attendance', entityId: `${s.id}:${rec.studentId}`, title: `Late attendance edit — session ${s.startsAt.toLocaleDateString('en-IN')}`, payload: { sessionId: s.id, ...rec }, requestedById: req.user!.id }))),
-    );
+  if (windowClosed) {
+    // ACD-07: later edits need approval — for every role (no Super Administrator bypass).
+    const reqs = await prisma.$transaction(async (tx) => {
+      const out = [];
+      for (const rec of records) out.push(await createApproval(tx, { type: 'ATTENDANCE_EDIT', entityType: 'attendance', entityId: `${s.id}:${rec.studentId}`, title: `Late attendance edit — session ${s.startsAt.toLocaleDateString('en-IN')}`, payload: { sessionId: s.id, ...rec }, requestedById: req.user!.id }));
+      await audit(tx, req, 'REQUEST_ATTENDANCE_EDIT', 'attendance', s.id, null, { records, approvals: out.map((a) => a.id) });
+      return out;
+    });
     return res.status(202).json({ message: 'The attendance window has closed. Your changes were sent for approval.', approvals: reqs.length });
   }
-  await prisma.$transaction(
-    records.map((rec) =>
-      prisma.attendance.upsert({
+  await prisma.$transaction(async (tx) => {
+    const before = await tx.attendance.findMany({ where: { sessionId: s.id, studentId: { in: records.map((x) => x.studentId) } }, select: { studentId: true, status: true } });
+    for (const rec of records) {
+      await tx.attendance.upsert({
         where: { sessionId_studentId: { sessionId: s.id, studentId: rec.studentId } },
         create: { sessionId: s.id, studentId: rec.studentId, status: rec.status, markedById: req.user!.id },
         update: { status: rec.status, markedById: req.user!.id, markedAt: new Date() },
-      }),
-    ),
-  );
-  await audit(req, s._count.attendance ? 'UPDATE' : 'CREATE', 'attendance', s.id, null, { count: records.length });
+      });
+    }
+    await audit(tx, req, s._count.attendance ? 'UPDATE' : 'CREATE', 'attendance', s.id, before, records);
+  });
   res.json({ ok: true, saved: records.length });
 }));
 
@@ -322,6 +353,8 @@ export async function studentAttendancePct(studentId: string) {
 }
 
 r.get('/batches/:id/attendance-summary', can('academics:read', 'attendance:mark'), ah(async (req, res) => {
+  const scope = await batchScopeIds(req.user!);
+  if (scope && !scope.includes(req.params.id)) throw notFound(); // faculty: own batches only
   const st = await getSettings();
   const map = await batchAttendance(req.params.id);
   const students = await prisma.student.findMany({ where: { batchId: req.params.id }, select: { id: true, studentCode: true, fullName: true } });

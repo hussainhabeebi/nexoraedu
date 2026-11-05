@@ -1,7 +1,10 @@
 /** Role-specific dashboards (SRS §16) and report catalogue (SRS §15). */
 import { Router } from 'express';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
-import { ah, badRequest } from '../lib/http';
+import { audit } from '../lib/audit';
+import { batchScopeIds } from '../lib/policy';
+import { ah, badRequest, forbidden } from '../lib/http';
 import { can, userCan } from '../lib/auth';
 import { getSettings } from '../lib/settings';
 import { money, toCsv } from '../lib/util';
@@ -183,7 +186,9 @@ r.get('/', ah(async (req, res) => {
 }));
 
 // ── Reports (FR-RPT-01/02) ──
-type ReportFn = (q: { from: Date; to: Date; [k: string]: any }) => Promise<Record<string, unknown>[]>;
+/** batchIds: null = unrestricted; otherwise only these batches (faculty, DSH-09 / RPT-02). */
+type ReportFn = (q: { from: Date; to: Date; batchIds: string[] | null; [k: string]: any }) => Promise<Record<string, unknown>[]>;
+const inBatches = (col: string, ids: string[] | null) => (ids ? Prisma.sql`AND ${Prisma.raw(col)} = ANY(${ids})` : Prisma.empty);
 const REPORTS: Record<string, { title: string; perm: string[]; run: ReportFn }> = {
   students: {
     title: 'Student list', perm: ['students:read'],
@@ -256,18 +261,18 @@ const REPORTS: Record<string, { title: string; perm: string[]; run: ReportFn }> 
   },
   attendance: {
     title: 'Attendance by student', perm: ['academics:read'],
-    run: async ({ from, to }) => prisma.$queryRaw`
+    run: async ({ from, to, batchIds }) => prisma.$queryRaw`
       SELECT b.code "Batch", s."studentCode" "ID", s."fullName" "Student", COUNT(a.id)::int "Sessions",
         SUM(CASE WHEN a.status IN ('PRESENT','LATE') THEN 1 ELSE 0 END)::int "Attended",
         ROUND(100.0 * SUM(CASE WHEN a.status IN ('PRESENT','LATE') THEN 1 ELSE 0 END) / NULLIF(COUNT(a.id), 0), 1)::float "%"
       FROM attendance a JOIN students s ON s.id = a."studentId" JOIN timetable_sessions t ON t.id = a."sessionId" JOIN batches b ON b.id = t."batchId"
-      WHERE t."startsAt" BETWEEN ${from} AND ${to} GROUP BY 1, 2, 3 ORDER BY 1, 6`,
+      WHERE t."startsAt" BETWEEN ${from} AND ${to} ${inBatches('b.id', batchIds)} GROUP BY 1, 2, 3 ORDER BY 1, 6`,
   },
   'exam-results': {
     title: 'Examination results', perm: ['exams:read'],
-    run: async ({ from, to }) => prisma.$queryRaw`
+    run: async ({ from, to, batchIds }) => prisma.$queryRaw`
       SELECT e.title "Exam", e.type "Type", s."studentCode" "ID", s."fullName" "Student", r.marks "Marks", e."totalMarks" "Total", r.percentage "%", r.grade "Grade", CASE WHEN r.passed THEN 'Pass' ELSE 'Fail' END "Result", CASE WHEN e."resultsPublished" THEN 'Yes' ELSE 'No' END "Published"
-      FROM results r JOIN exams e ON e.id = r."examId" JOIN students s ON s.id = r."studentId" WHERE e."startAt" BETWEEN ${from} AND ${to} ORDER BY 1, 5 DESC`,
+      FROM results r JOIN exams e ON e.id = r."examId" JOIN students s ON s.id = r."studentId" WHERE e."startAt" BETWEEN ${from} AND ${to} ${inBatches('e."batchId"', batchIds)} ORDER BY 1, 5 DESC`,
   },
 };
 
@@ -277,10 +282,13 @@ r.get('/reports', can('reports:read'), ah(async (req, res) => {
 r.get('/reports/:key', can('reports:read'), ah(async (req, res) => {
   const rep = REPORTS[req.params.key];
   if (!rep) throw badRequest('Unknown report');
-  if (!rep.perm.some((p) => userCan(req, p))) throw badRequest('You do not have access to this report.');
+  if (!rep.perm.some((p) => userCan(req, p))) throw forbidden('You do not have access to this report.'); // 403, not 400
   const from = req.query.from ? new Date(String(req.query.from)) : new Date(Date.now() - 30 * 864e5);
   const to = req.query.to ? new Date(String(req.query.to) + 'T23:59:59') : new Date();
-  const rows = await rep.run({ from, to });
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) throw badRequest('Invalid date range.');
+  const rows = await rep.run({ from, to, batchIds: await batchScopeIds(req.user!) });
+  // RPT-08: every report run and export is audit-logged (filters + row count, never the data itself).
+  await audit(prisma, req, req.query.format === 'csv' ? 'REPORT_EXPORT' : 'REPORT_RUN', 'report', req.params.key, null, { from, to, rows: rows.length, format: req.query.format ?? 'json' });
   if (req.query.format === 'csv') {
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="${req.params.key}-${from.toISOString().slice(0, 10)}.csv"`);

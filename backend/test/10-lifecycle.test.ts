@@ -1,27 +1,18 @@
 /**
  * End-to-end lifecycle (SRS §21): Enquiry → Application → Admission approval → Student → Fees → Exam → Result.
- * Runs against a disposable PostgreSQL database (TEST_DATABASE_URL).
+ * Runs against the disposable test database as the restricted app role. Privileged users (MFA roles) use
+ * fixture sessions; non-privileged users sign in over HTTP.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
-
-process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || 'postgresql://nexora:nexora@localhost:5432/nexora_test?schema=public';
-const { createApp } = await import('../src/app');
-const { prisma } = await import('../src/lib/prisma');
-const app = createApp();
-
-async function login(identifier: string, password = 'Admin@12345') {
-  const r = await request(app).post('/api/v1/auth/login').send({ identifier, password });
-  expect(r.status, JSON.stringify(r.body)).toBe(200);
-  return r.body.accessToken as string;
-}
-const as = (t: string) => ({ Authorization: `Bearer ${t}` });
+import { app, as, login, prisma, sessionFor } from './helpers';
 
 let counselor: string, salesmgr: string, accounts: string, examOfficer: string, admin: string;
 let courseId: string, batchId: string, studentId: string, studentToken: string;
 
 beforeAll(async () => {
-  [counselor, salesmgr, accounts, examOfficer, admin] = await Promise.all(['counselor1', 'salesmgr', 'accounts', 'examofficer', 'admin'].map((u) => login(u)));
+  [counselor, salesmgr, examOfficer] = await Promise.all(['counselor1', 'salesmgr', 'examofficer'].map((u) => login(u)));
+  [accounts, admin] = await Promise.all([sessionFor('accounts'), sessionFor('owner2')]); // finance staff + Super Admin (MFA roles)
   const c = await prisma.course.findUniqueOrThrow({ where: { code: 'FSD' }, include: { batches: true } });
   courseId = c.id;
   batchId = c.batches.find((b) => b.status === 'RUNNING')!.id;
@@ -121,7 +112,7 @@ describe('finance', () => {
     const p = await prisma.payment.findFirstOrThrow({ where: { studentId } });
     const req1 = await request(app).post(`/api/v1/finance/payments/${p.id}/cancel-request`).set(as(accounts)).send({ reason: 'Wrong student selected' });
     expect(req1.status).toBe(200);
-    const finmgr = await login('finmgr');
+    const finmgr = await sessionFor('finmgr');
     await request(app).post(`/api/v1/approvals/${req1.body.approval.id}/act`).set(as(finmgr)).send({ action: 'APPROVE' });
     const types = (await prisma.ledgerEntry.findMany({ where: { studentId } })).map((e) => e.type);
     expect(types).toContain('REVERSAL');
@@ -143,8 +134,13 @@ describe('online exam', () => {
 
     const st = await prisma.student.findUniqueOrThrow({ where: { id: studentId }, include: { user: true } });
     const bcrypt = (await import('bcryptjs')).default;
-    await prisma.user.update({ where: { id: st.userId! }, data: { passwordHash: await bcrypt.hash('Student@123', 10) } });
-    studentToken = await login(st.studentCode.toLowerCase(), 'Student@123');
+    await prisma.user.update({ where: { id: st.userId! }, data: { passwordHash: await bcrypt.hash('Student@123', 4) } });
+    const temp = await login(st.studentCode.toLowerCase(), 'Student@123');
+    // Admission issues a temporary password: the portal is blocked until it is changed (ADM-01, server-enforced).
+    expect((await request(app).get('/api/v1/portal/me').set(as(temp))).body.error.code).toBe('PASSWORD_CHANGE_REQUIRED');
+    const changed = await request(app).post('/api/v1/auth/change-password').set(as(temp)).send({ currentPassword: 'Student@123', newPassword: 'Velvet#Comet-Trail-2026' });
+    expect(changed.status, JSON.stringify(changed.body)).toBe(200);
+    studentToken = changed.body.accessToken;
 
     const start = await request(app).post(`/api/v1/portal/exams/${ex.body.id}/start`).set(as(studentToken)).send({ acknowledged: true });
     expect(start.status, JSON.stringify(start.body)).toBe(200);

@@ -5,8 +5,25 @@ import { applyDiscount, cancelPayment } from './finance';
 import { getSettings } from '../lib/settings';
 import { notifyLater } from './notify';
 import { computeResult } from './exams';
+import { badRequest } from '../lib/http';
 
 export function registerHandlers() {
+  // SRS 22.2: privileged roles are added only after a second Super Administrator approves.
+  registerApprovalHandler('USER_PRIVILEGE', {
+    onApprove: async (tx, r, actor) => {
+      const u = await tx.user.findUniqueOrThrow({ where: { id: r.entityId }, include: { roles: { include: { role: true } } } });
+      if (!u.isActive) throw badRequest('The user has been deactivated since the request was made.');
+      const add: string[] = r.payload?.add ?? [];
+      const roles = await tx.role.findMany({ where: { key: { in: add } } });
+      for (const role of roles) {
+        if (!u.roles.some((x) => x.roleId === role.id)) await tx.userRole.create({ data: { userId: u.id, roleId: role.id } });
+      }
+      // New permissions on the next request; MFA becomes mandatory (sessions without MFA are limited to enrolment).
+      await tx.user.update({ where: { id: u.id }, data: { authVersion: { increment: 1 } } });
+      await tx.auditLog.create({ data: { userId: actor, action: 'GRANT_PRIVILEGED_ROLES', entity: 'user', entityId: u.id, oldValues: { roles: u.roles.map((x) => x.role.key) }, newValues: { added: roles.map((x) => x.key), approvalId: r.id } } });
+    },
+  });
+
   registerApprovalHandler('ADMISSION', {
     onApprove: async (tx, r, actor) => {
       await admitApplication(tx, r.entityId, r.payload ?? {}, actor);

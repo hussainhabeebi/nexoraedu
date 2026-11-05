@@ -3,6 +3,7 @@ import { Router } from 'express';
 import crypto from 'crypto';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
+import { isHardened } from '../config';
 import { ah, HttpError } from '../lib/http';
 import { normalizePhone } from '../lib/util';
 import { getChatwootConfig } from '../services/chatwoot';
@@ -21,13 +22,15 @@ const safeEq = (a: string, b: string) => {
 /**
  * Chatwoot webhook (Settings → Integrations → Webhooks in Chatwoot, events: message_created,
  * conversation_created, conversation_status_changed, message_updated).
- * URL: {API_BASE_URL}/api/v1/webhooks/chatwoot?token={webhookSecret}
+ * URL: {API_BASE_URL}/api/v1/webhooks/chatwoot?token={webhookSecret}  (or header X-Webhook-Token)
  */
 r.post('/chatwoot', ah(async (req, res) => {
   const c = await getChatwootConfig();
-  const token = String(req.query.token || req.get('x-webhook-token') || '');
+  // S16 / LOG-02: header preferred. The ?token= form is still accepted because Chatwoot webhooks may not support custom
+  // headers (to be verified for the deployed Chatwoot version); our access/error logs strip query strings.
+  const token = String(req.get('x-webhook-token') || req.query.token || '');
   if (c.webhookSecret && !safeEq(token, c.webhookSecret)) throw new HttpError(401, 'Invalid webhook token', 'UNAUTHORIZED');
-  if (!c.webhookSecret && process.env.NODE_ENV === 'production') throw new HttpError(401, 'Webhook secret not configured', 'UNAUTHORIZED');
+  if (!c.webhookSecret && (isHardened || process.env.NODE_ENV === 'production')) throw new HttpError(401, 'Webhook secret not configured', 'UNAUTHORIZED');
   const e = req.body ?? {};
   const started = Date.now();
   try {

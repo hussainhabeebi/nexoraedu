@@ -23,7 +23,7 @@ r.put('/config', can('settings:manage'), ah(async (req, res) => {
     autoCreateLeads: z.boolean().default(true),
   }).parse(req.body);
   await cw.saveChatwootConfig({ ...d, apiToken: d.apiToken || undefined, webhookSecret: d.webhookSecret || undefined });
-  await audit(req, 'UPDATE', 'integration', 'chatwoot', null, { ...d, apiToken: d.apiToken ? '***' : undefined, webhookSecret: d.webhookSecret ? '***' : undefined });
+  await audit(prisma, req, 'UPDATE', 'integration', 'chatwoot', null, { ...d, apiToken: d.apiToken ? '***' : undefined, webhookSecret: d.webhookSecret ? '***' : undefined });
   res.json(await cw.publicChatwootConfig());
 }));
 r.post('/test', can('settings:manage', 'whatsapp:send'), ah(async (_req, res) => res.json(await cw.testConnection())));
@@ -62,7 +62,7 @@ const sendSchema = z.object({
 r.post('/conversations/:id/reply', can('whatsapp:send'), ah(async (req, res) => {
   const d = sendSchema.parse(req.body);
   const out = await cw.replyToConversation(Number(req.params.id), d.content, d.template);
-  await audit(req, 'WHATSAPP_REPLY', 'whatsapp', String(req.params.id));
+  await audit(prisma, req, 'WHATSAPP_REPLY', 'whatsapp', String(req.params.id));
   res.json(out);
 }));
 
@@ -125,7 +125,7 @@ r.post('/bulk', can('whatsapp:send'), ah(async (req, res) => {
       results.push({ phone: t.phone, ok: false, error: e.message });
     }
   }
-  await audit(req, 'BULK_WHATSAPP', 'whatsapp', null, null, { count: targets.length });
+  await audit(prisma, req, 'BULK_WHATSAPP', 'whatsapp', null, null, { count: targets.length });
   res.json({ sent: results.filter((x) => x.ok).length, failed: results.filter((x) => !x.ok).length, results });
 }));
 

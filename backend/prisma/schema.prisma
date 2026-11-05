@@ -79,7 +79,10 @@ model User {
   failedLogins       Int             @default(0)
   lockedUntil        DateTime?
   roles              UserRole[]
-  refreshTokens      RefreshToken[]
+  authVersion        Int             @default(1)
+  passwordChangedAt  DateTime?
+  sessions           Session[]
+  mfaFactor          MfaFactor?
   faculty            FacultyProfile?
   student            Student?        @relation("StudentUser")
   ownedLeads         Lead[]          @relation("LeadOwner")
@@ -98,21 +101,76 @@ model UserRole {
   @@map("user_roles")
 }
 
-model RefreshToken {
+/// Server-side session (SEC-05). One row per refresh-token generation; rotation creates a new row in the same family.
+model Session {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  familyId      String
+  refreshHash   String    @unique
+  mfaVerified   Boolean   @default(false)
+  ip            String?
+  userAgent     String?
+  createdAt     DateTime  @default(now())
+  lastSeenAt    DateTime  @default(now())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  revokedReason String?
+  @@index([userId])
+  @@index([familyId])
+  @@map("sessions")
+}
+
+/// TOTP authenticator factor (SEC-06). Secret is AES-256-GCM encrypted.
+model MfaFactor {
+  id           String    @id @default(cuid())
+  userId       String    @unique
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  secretEnc    String
+  confirmedAt  DateTime?
+  lastUsedStep Int       @default(0)
+  createdAt    DateTime  @default(now())
+  @@map("mfa_factors")
+}
+
+model MfaRecoveryCode {
   id        String    @id @default(cuid())
   userId    String
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tokenHash String    @unique
-  expiresAt DateTime
-  revokedAt DateTime?
+  codeHash  String
+  usedAt    DateTime?
   createdAt DateTime  @default(now())
   @@index([userId])
-  @@map("refresh_tokens")
+  @@map("mfa_recovery_codes")
+}
+
+/// Single-use second-step challenge issued after a correct password (5 minutes).
+model MfaChallenge {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  portal    String?
+  attempts  Int       @default(0)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  @@map("mfa_challenges")
+}
+
+/// Last password hashes, for the reuse rule (SEC-04).
+model PasswordHistory {
+  id        String   @id @default(cuid())
+  userId    String
+  hash      String
+  createdAt DateTime @default(now())
+  @@index([userId, createdAt])
+  @@map("password_history")
 }
 
 model PasswordReset {
   id        String    @id @default(cuid())
   userId    String
+  /// RESET (forgot password) or ENROLL (first-time account activation)
+  purpose   String    @default("RESET")
   tokenHash String    @unique
   expiresAt DateTime
   usedAt    DateTime?
@@ -836,6 +894,8 @@ model ApprovalAction {
   action    String // APPROVE, REJECT, RETURN
   comment   String?
   userId    String
+  ip        String?
+  userAgent String?
   createdAt DateTime        @default(now())
   @@map("approval_actions")
 }
@@ -900,6 +960,8 @@ model AuditLog {
   oldValues Json?
   newValues Json?
   ip        String?
+  userAgent String?
+  requestId String?
   createdAt DateTime @default(now())
   @@index([entity, entityId])
   @@index([createdAt])
@@ -909,6 +971,8 @@ model AuditLog {
 model LoginLog {
   id        String   @id @default(cuid())
   userId    String?
+  /// LOGIN_OK, LOGIN_FAIL, LOCKED, LOGOUT, MFA_OK, MFA_FAIL, MFA_ENROLLED, MFA_RESET, PASSWORD_CHANGE, PASSWORD_RESET, SESSION_REVOKED, TOKEN_REUSE
+  event     String   @default("LOGIN")
   identifier String
   success   Boolean
   ip        String?

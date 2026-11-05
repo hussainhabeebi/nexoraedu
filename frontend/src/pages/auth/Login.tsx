@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Eye, EyeOff } from 'lucide-react';
-import { useAuth } from '@/lib/auth';
+import { pendingStep, useAuth } from '@/lib/auth';
 import AuthShell from '@/components/AuthShell';
 import { ErrorBox, Input, Spinner } from '@/components/ui';
 
 export default function Login({ portal }: { portal: 'staff' | 'student' }) {
-  const { login } = useAuth();
+  const { login, verifyMfa } = useAuth();
+  const [mfa, setMfa] = useState<{ token: string; code: string; recovery: boolean } | null>(null);
   const nav = useNavigate();
   const loc = useLocation() as any;
   const [f, setF] = useState({ identifier: '', password: '' });
@@ -14,6 +15,7 @@ export default function Login({ portal }: { portal: 'staff' | 'student' }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<unknown>(null);
   const student = portal === 'student';
+  const go = (user: Parameters<typeof pendingStep>[0]) => nav(pendingStep(user) ?? loc.state?.from ?? (student ? '/student' : '/staff/dashboard'), { replace: true });
   return (
     <AuthShell
       title={student ? 'Student portal' : 'Staff sign in'}
@@ -28,12 +30,30 @@ export default function Login({ portal }: { portal: 'staff' | 'student' }) {
         e.preventDefault();
         setBusy(true); setErr(null);
         try {
-          const s = await login(f.identifier, f.password, portal);
-          if (s.user.mustChangePassword) nav('/change-password');
-          else nav(loc.state?.from ?? (student ? '/student' : '/staff/dashboard'), { replace: true });
-        } catch (e) { setErr(e); } finally { setBusy(false); }
+          if (mfa) {
+            const s = await verifyMfa(mfa.token, mfa.recovery ? { recoveryCode: mfa.code } : { code: mfa.code.replace(/\s/g, '') });
+            return go(s.user);
+          }
+          const r = await login(f.identifier, f.password, portal);
+          if (r.kind === 'mfa') return setMfa({ token: r.challenge.mfaToken, code: '', recovery: false });
+          go(r.session.user);
+        } catch (e: any) {
+          setErr(e);
+          if (e?.code === 'MFA_CHALLENGE_EXPIRED') setMfa(null);
+        } finally { setBusy(false); }
       }}>
         <ErrorBox error={err} />
+        {mfa ? (
+          <div className="space-y-4">
+            <p className="text-sm text-slate-600">{mfa.recovery ? 'Enter one of your one-time recovery codes.' : 'Enter the 6-digit code from your authenticator app.'}</p>
+            <Input label={mfa.recovery ? 'Recovery code' : 'Authentication code'} required autoFocus autoComplete="one-time-code" inputMode={mfa.recovery ? 'text' : 'numeric'} value={mfa.code} onChange={(e) => setMfa({ ...mfa, code: e.target.value })} placeholder={mfa.recovery ? 'xxxx-xxxx-xxxx' : '123456'} />
+            <div className="flex justify-between text-sm">
+              <button type="button" className="link" onClick={() => setMfa({ ...mfa, recovery: !mfa.recovery, code: '' })}>{mfa.recovery ? 'Use authenticator code' : 'Use a recovery code'}</button>
+              <button type="button" className="link" onClick={() => { setMfa(null); setErr(null); }}>Start again</button>
+            </div>
+            <button className="btn-primary w-full" disabled={busy}>{busy && <Spinner className="h-4 w-4 text-white" />} Verify</button>
+          </div>
+        ) : <>
         <Input label={student ? 'Student ID or email' : 'Username or email'} required autoComplete="username" value={f.identifier} onChange={(e) => setF({ ...f, identifier: e.target.value })} placeholder={student ? 'nxa-2026-00001' : 'you@nexoraed.com'} />
         <div>
           <label className="label" htmlFor="pw">Password <span className="text-rose-600">*</span></label>
@@ -44,6 +64,7 @@ export default function Login({ portal }: { portal: 'staff' | 'student' }) {
         </div>
         <div className="flex justify-end"><Link to="/forgot-password" className="text-sm link">Forgot password?</Link></div>
         <button className="btn-primary w-full" disabled={busy}>{busy && <Spinner className="h-4 w-4 text-white" />} Sign in</button>
+        </>}
       </form>
       <p className="mt-8 text-center text-sm text-slate-500">
         {student ? <>Staff member? <Link to="/login" className="link">Staff sign in</Link></> : <>Student? <Link to="/student/login" className="link">Student portal</Link></>}

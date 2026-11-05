@@ -26,7 +26,7 @@ const GROUPS: { title: string; items: Item[] }[] = [
   {
     title: 'Students',
     items: [
-      { to: '/staff/students', label: 'Students', icon: GraduationCap, perm: ['students:read', 'students:read_batch'] },
+      { to: '/staff/students', label: 'Students', icon: GraduationCap, perm: ['students:read', 'students:read_batch', 'students:read_own'] },
       { to: '/staff/documents', label: 'Document verification', icon: FileCheck2, perm: ['documents:verify'] },
     ],
   },
@@ -203,6 +203,7 @@ export default function StaffLayout() {
             {menu && (
               <div className="absolute right-0 z-50 mt-2 w-52 rounded-xl border border-slate-200 bg-white p-1 shadow-xl" onMouseLeave={() => setMenu(false)}>
                 <Link to="/change-password" className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-slate-50"><KeyRound className="h-4 w-4" /> Change password</Link>
+                <Link to="/security" className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-slate-50"><KeyRound className="h-4 w-4" /> Security & sessions</Link>
                 <button className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-rose-600 hover:bg-rose-50" onClick={async () => { await logout(); nav('/login'); }}><LogOut className="h-4 w-4" /> Sign out</button>
               </div>
             )}

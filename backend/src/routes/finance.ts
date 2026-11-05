@@ -9,7 +9,7 @@ import { audit } from '../lib/audit';
 import { getSettings } from '../lib/settings';
 import { money, toCsv } from '../lib/util';
 import { createApproval } from '../services/approvals';
-import { createFeePlan, ledger, recordPayment, studentBalance } from '../services/finance';
+import { applyDiscount, createFeePlan, ledger, recordPayment, studentBalance } from '../services/finance';
 import { notifyLater } from '../services/notify';
 
 const r = Router();
@@ -36,8 +36,11 @@ r.post('/students/:id/fee-plan', can('finance:manage'), ah(async (req, res) => {
   const st = await prisma.student.findUniqueOrThrow({ where: { id: req.params.id } });
   const existing = await prisma.feePlan.count({ where: { studentId: st.id, courseId: st.courseId } });
   if (existing) throw badRequest('A fee plan already exists for this course. Use discounts or adjustments instead.');
-  const plan = await prisma.$transaction((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments, startDate, userId: req.user!.id }));
-  await audit(req, 'CREATE', 'fee_plan', plan.id, null, { installments });
+  const plan = await prisma.$transaction(async (tx) => {
+    const plan = await createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments, startDate, userId: req.user!.id });
+    await audit(tx, req, 'CREATE', 'fee_plan', plan.id, null, { studentId: st.id, installments, startDate });
+    return plan;
+  });
   res.status(201).json(plan);
 }));
 
@@ -54,8 +57,12 @@ r.post('/payments', can('finance:collect'), ah(async (req, res) => {
   const d = paymentSchema.parse(req.body);
   if (['CHEQUE', 'BANK_TRANSFER', 'UPI', 'CARD'].includes(d.mode) && !d.reference) throw badRequest('Reference number is required for this payment mode.');
   const key = req.get('Idempotency-Key') || undefined;
-  const p = await prisma.$transaction((tx) => recordPayment(tx, { ...d, idempotencyKey: key, userId: req.user!.id }));
-  await audit(req, 'CREATE', 'payment', p.id, null, d);
+  const p = await prisma.$transaction(async (tx) => {
+    const before = key ? await tx.payment.findUnique({ where: { idempotencyKey: key }, select: { id: true } }) : null;
+    const p = await recordPayment(tx, { ...d, idempotencyKey: key, userId: req.user!.id });
+    if (!before) await audit(tx, req, 'CREATE', 'payment', p.id, null, { ...d, receiptNumber: p.receiptNumber });
+    return p;
+  });
   const st = await prisma.student.findUniqueOrThrow({ where: { id: d.studentId }, include: { lead: true } });
   const bal = await studentBalance(st.id);
   notifyLater('payment.received', { userId: st.userId, name: st.fullName, email: st.email, phone: st.phone, conversationId: st.lead?.chatwootConversationId }, { name: st.fullName, amount: money(p.amount).toFixed(2), receipt: p.receiptNumber, balance: bal.toFixed(2), date: p.paidAt.toLocaleDateString('en-IN') });
@@ -74,6 +81,7 @@ r.get('/payments', can('finance:read'), ah(async (req, res) => {
   const include = { student: { select: { id: true, fullName: true, studentCode: true } } };
   if (req.query.format === 'csv') {
     const all = await prisma.payment.findMany({ where, include, orderBy: { paidAt: 'desc' }, take: 10000 });
+    await audit(prisma, req, 'EXPORT', 'payment', null, null, { format: 'csv', rows: all.length, filters: req.query }); // RPT-08
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="payments.csv"');
     return res.send(toCsv(all.map((p) => ({ receipt: p.receiptNumber, date: p.paidAt, student: p.student.fullName, studentId: p.student.studentCode, amount: Number(p.amount), mode: p.mode, reference: p.reference, status: p.status }))));
@@ -124,10 +132,12 @@ r.post('/payments/:id/cancel-request', can('finance:collect'), ah(async (req, re
   const p = await prisma.payment.findUniqueOrThrow({ where: { id: req.params.id }, include: { student: true } });
   if (p.status !== 'POSTED') throw badRequest(`Payment is already ${p.status.toLowerCase().replace('_', ' ')}.`);
   const a = await prisma.$transaction(async (tx) => {
-    await tx.payment.update({ where: { id: p.id }, data: { status: 'CANCEL_REQUESTED' } });
-    return createApproval(tx, { type: 'PAYMENT_CANCELLATION', entityType: 'payment', entityId: p.id, title: `Cancel receipt ${p.receiptNumber} — ${p.student.fullName} (${money(p.amount)})`, payload: { reason }, amount: Number(p.amount), requestedById: req.user!.id });
+    const moved = await tx.payment.updateMany({ where: { id: p.id, status: 'POSTED' }, data: { status: 'CANCEL_REQUESTED' } });
+    if (moved.count !== 1) throw badRequest('This payment already has a cancellation request.');
+    const a = await createApproval(tx, { type: 'PAYMENT_CANCELLATION', entityType: 'payment', entityId: p.id, title: `Cancel receipt ${p.receiptNumber} — ${p.student.fullName} (${money(p.amount)})`, payload: { reason }, amount: Number(p.amount), requestedById: req.user!.id });
+    await audit(tx, req, 'CANCEL_REQUEST', 'payment', p.id, { status: 'POSTED' }, { status: 'CANCEL_REQUESTED', reason, approvalId: a.id });
+    return a;
   });
-  await audit(req, 'CANCEL_REQUEST', 'payment', p.id, null, { reason });
   res.json({ approval: a });
 }));
 
@@ -143,19 +153,21 @@ r.post('/discounts', can('finance:collect', 'finance:manage'), ah(async (req, re
   const s = await getSettings();
   const result = await prisma.$transaction(async (tx) => {
     const disc = await tx.discount.create({ data: { ...d, amount, feePlanId: plan.id, requestedById: req.user!.id } });
-    // Within limit and requested by a finance manager → single-level auto-approval; otherwise workflow.
-    const selfApprove = userCan(req, 'finance:manage') && amount <= s.finance.discountApprovalLimit && d.kind !== 'SCHOLARSHIP';
+    // FIN-09: a Finance Manager may apply a non-scholarship discount up to the configured limit without approval.
+    // This is an explicit, audited policy decision — not an auto-approved request. Everything else goes to the workflow.
+    const withinLimit = userCan(req, 'finance:manage') && amount <= s.finance.discountApprovalLimit && d.kind !== 'SCHOLARSHIP';
+    if (withinLimit) {
+      await applyDiscount(tx, disc.id, req.user!.id);
+      await audit(tx, req, 'DISCOUNT_APPLIED_WITHIN_LIMIT', 'discount', disc.id, null, { ...d, amount, limit: s.finance.discountApprovalLimit });
+      return { discount: disc, approval: null };
+    }
     const appr = await createApproval(tx, {
-      type: selfApprove ? 'DISCOUNT_AUTO' : 'DISCOUNT', entityType: 'discount', entityId: disc.id,
+      type: 'DISCOUNT', entityType: 'discount', entityId: disc.id,
       title: `${d.kind === 'SCHOLARSHIP' ? 'Scholarship' : 'Discount'} ${money(amount)} for ${st.fullName}: ${d.reason}`, payload: d, amount, requestedById: req.user!.id,
     });
-    if (selfApprove) {
-      const { applyDiscount } = await import('../services/finance');
-      await applyDiscount(tx, disc.id, req.user!.id);
-    }
+    await audit(tx, req, 'CREATE', 'discount', disc.id, null, { ...d, amount, approvalId: appr.id });
     return { discount: disc, approval: appr };
   });
-  await audit(req, 'CREATE', 'discount', result.discount.id, null, { ...d, amount });
   res.status(201).json(result);
 }));
 
@@ -170,9 +182,9 @@ r.post('/refunds', can('finance:collect', 'finance:manage'), ah(async (req, res)
   const out = await prisma.$transaction(async (tx) => {
     const rf = await tx.refund.create({ data: { ...d, requestedById: req.user!.id } });
     const a = await createApproval(tx, { type: 'REFUND', entityType: 'refund', entityId: rf.id, title: `Refund ${money(d.amount)} to ${st.fullName}: ${d.reason}`, payload: d, amount: d.amount, requestedById: req.user!.id });
+    await audit(tx, req, 'CREATE', 'refund', rf.id, null, { ...d, approvalId: a.id });
     return { refund: rf, approval: a };
   });
-  await audit(req, 'CREATE', 'refund', out.refund.id, null, d);
   res.status(201).json(out);
 }));
 r.post('/refunds/:id/pay', can('finance:manage'), ah(async (req, res) => {
@@ -180,11 +192,13 @@ r.post('/refunds/:id/pay', can('finance:manage'), ah(async (req, res) => {
   const rf = await prisma.refund.findUniqueOrThrow({ where: { id: req.params.id } });
   if (rf.status !== 'APPROVED') throw badRequest('Only approved refunds can be paid.');
   await prisma.$transaction(async (tx) => {
-    await tx.refund.update({ where: { id: rf.id }, data: { status: 'PAID', reference, paidAt: new Date() } });
+    // Conditional transition prevents paying the same refund twice under concurrency.
+    const paid = await tx.refund.updateMany({ where: { id: rf.id, status: 'APPROVED' }, data: { status: 'PAID', reference, paidAt: new Date() } });
+    if (paid.count !== 1) throw badRequest('Only approved refunds can be paid.');
     await ledger(tx, { studentId: rf.studentId, type: 'REFUND', debit: Number(rf.amount), refType: 'refund', refId: rf.id, narration: `Refund paid (ref ${reference})`, userId: req.user!.id });
     await tx.studentHistory.create({ data: { studentId: rf.studentId, type: 'FEE', message: `Refund of ${money(rf.amount)} paid`, userId: req.user!.id } });
+    await audit(tx, req, 'PAY', 'refund', rf.id, { status: 'APPROVED' }, { status: 'PAID', reference });
   });
-  await audit(req, 'PAY', 'refund', rf.id, null, { reference });
   res.json({ ok: true });
 }));
 r.get('/refunds', can('finance:read'), ah(async (req, res) => {
@@ -220,6 +234,7 @@ r.get('/outstanding', can('finance:read'), ah(async (req, res) => {
   let items = [...byStudent.values()].sort((a, b) => b.overdue - a.overdue);
   if (req.query.onlyOverdue === 'true') items = items.filter((i) => i.overdue > 0);
   if (req.query.format === 'csv') {
+    await audit(prisma, req, 'EXPORT', 'outstanding', null, null, { format: 'csv', rows: items.length, filters: req.query }); // RPT-08
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="outstanding.csv"');
     return res.send(toCsv(items));
