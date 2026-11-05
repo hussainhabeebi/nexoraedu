@@ -8,9 +8,9 @@ import { bumpAuthVersion, can, isSuperAdmin, revokeUserSessions } from '../lib/a
 import { audit, securityEvent } from '../lib/audit';
 import { PERMISSIONS, isKnownPermission, isPrivilegedRole } from '../lib/permissions';
 import { DEFAULT_SETTINGS, getSettings, invalidateSettings } from '../lib/settings';
-import { hashPassword, MIN_LENGTH_FLOOR, setPassword } from '../lib/password';
-import { normalizeEmail, randomPassword, randomToken, sha256 } from '../lib/util';
-import { config } from '../config';
+import { MIN_LENGTH_FLOOR, UNUSABLE_PASSWORD } from '../lib/password';
+import { issueActivationLink, issueResetLink } from '../lib/activation';
+import { normalizeEmail } from '../lib/util';
 import { notifyLater } from '../services/notify';
 import { APPROVAL_TYPES, assertWorkflowLevels, createApproval, MANDATORY_APPROVAL_TYPES } from '../services/approvals';
 
@@ -82,23 +82,24 @@ r.post('/users', can('users:manage'), ah(async (req, res) => {
   assertOverrides(req, d.extraPermissions);
   const direct = roles.filter((x) => !isPrivilegedRole(x.key));
   const pending = roles.filter((x) => isPrivilegedRole(x.key)).map((x) => x.key);
-  const temp = randomPassword();
   const out = await prisma.$transaction(async (tx) => {
     const u = await tx.user.create({
       data: {
         name: d.name, email: normalizeEmail(d.email)!, username: d.username.toLowerCase(), phone: d.phone, designation: d.designation,
         departmentId: d.departmentId || null, joiningDate: d.joiningDate || null, extraPermissions: d.extraPermissions ?? [],
-        passwordHash: await hashPassword(temp), mustChangePassword: true,
+        // Decision 8: no password is created or sent; the user sets one through a single-use activation link.
+        passwordHash: UNUSABLE_PASSWORD, mustChangePassword: false,
         roles: { create: direct.map((x) => ({ roleId: x.id })) },
         ...(d.roles.includes('faculty') && { faculty: { create: {} } }),
       },
     });
     const approval = pending.length ? await requestPrivilegedGrant(tx, req, u.id, u.name, pending) : null;
-    await audit(tx, req, 'CREATE', 'user', u.id, null, { ...d, appliedRoles: direct.map((x) => x.key), pendingRoles: pending, approvalId: approval?.id });
-    return { u, approval };
+    const act = await issueActivationLink(tx, u.id);
+    await audit(tx, req, 'CREATE', 'user', u.id, null, { ...d, appliedRoles: direct.map((x) => x.key), pendingRoles: pending, approvalId: approval?.id, activationHours: act.hours });
+    return { u, approval, act };
   });
-  notifyLater('user.welcome', { userId: out.u.id, name: out.u.name, email: out.u.email, phone: out.u.phone }, { name: out.u.name, username: out.u.username, password: temp }, { channels: ['EMAIL', 'WHATSAPP'] });
-  res.status(201).json({ id: out.u.id, temporaryPassword: temp, pendingRoles: pending, approval: out.approval });
+  notifyLater('user.welcome', { userId: out.u.id, name: out.u.name, email: out.u.email, phone: out.u.phone }, { name: out.u.name, username: out.u.username, link: out.act.link, hours: out.act.hours }, { channels: ['EMAIL', 'WHATSAPP'], sensitive: true });
+  res.status(201).json({ id: out.u.id, activationSent: true, activationHours: out.act.hours, pendingRoles: pending, approval: out.approval });
 }));
 
 r.patch('/users/:id', can('users:manage'), ah(async (req, res) => {
@@ -155,27 +156,32 @@ r.patch('/users/:id', can('users:manage'), ah(async (req, res) => {
 r.post('/users/:id/reset-password', can('users:manage'), ah(async (req, res) => {
   const target = await prisma.user.findUniqueOrThrow({ where: { id: req.params.id }, include: { roles: { include: { role: true } } } });
   if (target.id === req.user!.id) throw badRequest('Use "Change password" for your own account.');
-  const keys = roleKeysOf(target);
-  assertCanManage(req, keys);
-  if (keys.some(isPrivilegedRole)) {
-    // Privileged accounts: never reveal a password to another person; send a single-use reset link instead.
-    const token = randomToken(32);
-    await prisma.$transaction(async (tx) => {
-      await tx.passwordReset.create({ data: { userId: target.id, purpose: 'RESET', tokenHash: sha256(token), expiresAt: new Date(Date.now() + 30 * 60_000) } });
-      await revokeUserSessions(tx, target.id, 'ADMIN_RESET');
-      await bumpAuthVersion(tx, target.id);
-      await audit(tx, req, 'RESET_PASSWORD_LINK', 'user', target.id);
-    });
-    notifyLater('auth.password_reset', { userId: target.id, name: target.name, email: target.email, phone: target.phone }, { name: target.name, link: `${config.publicAppUrl}/reset-password?token=${token}` }, { channels: ['EMAIL', 'WHATSAPP'] });
-    return res.json({ ok: true, delivery: 'reset-link' });
-  }
-  const temp = randomPassword();
-  await prisma.$transaction(async (tx) => {
-    await setPassword(tx, target.id, temp, { mustChange: true });
+  assertCanManage(req, roleKeysOf(target));
+  // Decision 8: never reveal or send a password; the user receives a single-use reset link (24 h for admin-initiated resets).
+  const link = await prisma.$transaction(async (tx) => {
+    const l = await issueResetLink(tx, target.id, 24 * 60);
     await revokeUserSessions(tx, target.id, 'ADMIN_RESET');
-    await audit(tx, req, 'RESET_PASSWORD', 'user', target.id);
+    await bumpAuthVersion(tx, target.id);
+    await audit(tx, req, 'RESET_PASSWORD_LINK', 'user', target.id);
+    return l;
   });
-  res.json({ temporaryPassword: temp });
+  notifyLater('auth.password_reset', { userId: target.id, name: target.name, email: target.email, phone: target.phone }, { name: target.name, link: link.link }, { channels: ['EMAIL', 'WHATSAPP'], sensitive: true });
+  res.json({ ok: true, delivery: 'reset-link' });
+}));
+
+/** Re-send the activation link for an account that has never been activated (old links stop working). */
+r.post('/users/:id/resend-activation', can('users:manage'), ah(async (req, res) => {
+  const target = await prisma.user.findUniqueOrThrow({ where: { id: req.params.id }, include: { roles: { include: { role: true } } } });
+  assertCanManage(req, roleKeysOf(target));
+  if (target.passwordHash.startsWith('$2')) throw badRequest('This account is already activated. Use "Reset password" instead.');
+  if (!target.isActive) throw badRequest('This account is deactivated.');
+  const act = await prisma.$transaction(async (tx) => {
+    const a = await issueActivationLink(tx, target.id);
+    await audit(tx, req, 'RESEND_ACTIVATION', 'user', target.id, null, { hours: a.hours });
+    return a;
+  });
+  notifyLater('user.welcome', { userId: target.id, name: target.name, email: target.email, phone: target.phone }, { name: target.name, username: target.username, link: act.link, hours: act.hours }, { channels: ['EMAIL', 'WHATSAPP'], sensitive: true });
+  res.json({ ok: true, activationHours: act.hours });
 }));
 
 /** SEC-06: a Super Administrator can reset another user's MFA (lost device). Never their own. */
@@ -197,19 +203,21 @@ r.post('/users/:id/mfa/reset', can('users:manage'), ah(async (req, res) => {
 // FR-USR-03 bulk import (JSON rows parsed client-side from CSV). Privileged roles cannot be bulk-imported.
 r.post('/users/import', can('users:manage'), ah(async (req, res) => {
   const rows = z.array(userSchema.omit({ extraPermissions: true })).max(500).parse(req.body.rows);
-  const out: { row: number; ok: boolean; error?: string; temporaryPassword?: string }[] = [];
+  const out: { row: number; ok: boolean; error?: string }[] = [];
   for (const [i, d] of rows.entries()) {
     try {
       const priv = d.roles.filter(isPrivilegedRole);
       if (priv.length) throw new Error(`Privileged roles cannot be bulk-imported (${priv.join(', ')})`);
       const roles = await prisma.role.findMany({ where: { key: { in: d.roles } } });
       if (roles.length !== d.roles.length) throw new Error('Unknown role');
-      const temp = randomPassword();
-      await prisma.$transaction(async (tx) => {
-        const u = await tx.user.create({ data: { name: d.name, email: normalizeEmail(d.email)!, username: d.username.toLowerCase(), phone: d.phone, designation: d.designation, passwordHash: await hashPassword(temp), mustChangePassword: true, roles: { create: roles.map((x) => ({ roleId: x.id })) } } });
+      const created = await prisma.$transaction(async (tx) => {
+        const u = await tx.user.create({ data: { name: d.name, email: normalizeEmail(d.email)!, username: d.username.toLowerCase(), phone: d.phone, designation: d.designation, passwordHash: UNUSABLE_PASSWORD, mustChangePassword: false, roles: { create: roles.map((x) => ({ roleId: x.id })) } } });
+        const act = await issueActivationLink(tx, u.id);
         await audit(tx, req, 'CREATE', 'user', u.id, null, { ...d, via: 'import' });
+        return { u, act };
       });
-      out.push({ row: i + 1, ok: true, temporaryPassword: temp });
+      notifyLater('user.welcome', { userId: created.u.id, name: created.u.name, email: created.u.email, phone: created.u.phone }, { name: created.u.name, username: created.u.username, link: created.act.link, hours: created.act.hours }, { channels: ['EMAIL', 'WHATSAPP'], sensitive: true });
+      out.push({ row: i + 1, ok: true });
     } catch (e: any) {
       out.push({ row: i + 1, ok: false, error: e.code === 'P2002' ? 'Email or username already exists' : e.message });
     }
@@ -326,7 +334,7 @@ r.put('/settings/:key', can('settings:manage'), ah(async (req, res) => {
   const value: any = { ...before, ...z.record(z.string(), z.any()).parse(req.body) };
   if (key === 'security') {
     // Security floors from the SRS cannot be weakened from the UI (SEC-01, SEC-04, SEC-05).
-    const sec = z.object({ sessionTimeoutMin: z.number().int().min(5).max(240), passwordMinLength: z.number().int().min(MIN_LENGTH_FLOOR).max(64), maxFailedLogins: z.number().int().min(3).max(10), lockMinutes: z.number().int().min(5).max(1440) }).parse(value);
+    const sec = z.object({ sessionTimeoutMin: z.number().int().min(5).max(240), passwordMinLength: z.number().int().min(MIN_LENGTH_FLOOR).max(64), maxFailedLogins: z.number().int().min(3).max(10), lockMinutes: z.number().int().min(5).max(1440), activationHours: z.number().int().min(1).max(168) }).parse(value);
     Object.assign(value, sec);
   }
   await prisma.$transaction(async (tx) => {

@@ -49,10 +49,16 @@ export async function outstandingInstallments(tx: Tx, studentId: string) {
 }
 
 /** FIN-05/06: record a payment, allocate FIFO to installments, post ledger, issue receipt number. */
+/** Serialises all money movements on one student account (FIN-05/13, 8.4): prevents parallel overpayment. */
+export async function lockStudentAccount(tx: Tx, studentId: string) {
+  await tx.$queryRaw`SELECT id FROM students WHERE id = ${studentId} FOR UPDATE`;
+}
+
 export async function recordPayment(
   tx: Tx,
   p: { studentId: string; amount: number; mode: string; reference?: string; payer?: string; paidAt?: Date; idempotencyKey?: string; gatewayRef?: string; userId?: string },
 ) {
+  await lockStudentAccount(tx, p.studentId);
   if (p.idempotencyKey) {
     const dup = await tx.payment.findUnique({ where: { idempotencyKey: p.idempotencyKey } });
     if (dup) return dup;
@@ -86,6 +92,7 @@ export async function recordPayment(
 export async function cancelPayment(tx: Tx, paymentId: string, userId: string) {
   const pay = await tx.payment.findUnique({ where: { id: paymentId }, include: { allocations: true } });
   if (!pay) throw notFound('Payment not found');
+  await lockStudentAccount(tx, pay.studentId);
   if (pay.status === 'CANCELLED') return;
   for (const a of pay.allocations) {
     const i = await tx.installment.findUniqueOrThrow({ where: { id: a.installmentId } });
@@ -100,6 +107,7 @@ export async function cancelPayment(tx: Tx, paymentId: string, userId: string) {
 /** Executed after DISCOUNT approval: reduce installments from the last one backwards, post credit. */
 export async function applyDiscount(tx: Tx, discountId: string, userId: string) {
   const d = await tx.discount.findUniqueOrThrow({ where: { id: discountId } });
+  await lockStudentAccount(tx, d.studentId);
   if (d.status === 'APPLIED') return;
   let left = Number(d.amount);
   const insts = await tx.installment.findMany({ where: { feePlanId: d.feePlanId }, orderBy: { seq: 'desc' } });

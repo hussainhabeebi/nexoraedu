@@ -38,11 +38,13 @@ describe('R2 Super Administrator accounts', () => {
     const r = await request(app).post(`/api/v1/admin/users/${saBId}/reset-password`).set(as(saA));
     expect(r.status).toBe(200);
     expect(r.body).toEqual({ ok: true, delivery: 'reset-link' });
-    // Non-privileged: temporary password, must change at next sign-in.
+    // Decision 8: non-privileged accounts also get a single-use link — no password is ever returned or sent.
     const c = await makeUser(['counselor']);
+    const before = (await prisma.user.findUniqueOrThrow({ where: { id: c.id } })).passwordHash;
     const r2 = await request(app).post(`/api/v1/admin/users/${c.id}/reset-password`).set(as(adminTok));
-    expect(r2.body.temporaryPassword).toBeTruthy();
-    expect((await prisma.user.findUniqueOrThrow({ where: { id: c.id } })).mustChangePassword).toBe(true);
+    expect(r2.body).toEqual({ ok: true, delivery: 'reset-link' });
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: c.id } })).passwordHash).toBe(before);
+    expect(await prisma.passwordReset.count({ where: { userId: c.id, purpose: 'RESET', usedAt: null } })).toBe(1);
     expect((await request(app).post(`/api/v1/admin/users/${(await prisma.user.findUniqueOrThrow({ where: { username: 'office' } })).id}/reset-password`).set(as(adminTok))).status).toBe(400); // not on own account
   });
 
@@ -116,15 +118,14 @@ describe('R5 object-level scoping', () => {
     docId = (await prisma.document.create({ data: { studentId: st.id, type: 'id_proof', fileName: 'id.pdf', storagePath: 'scopetest-id.pdf', mimeType: 'application/pdf', size: 18 } })).id;
   });
 
-  it('SEC-T14 identity documents: owner counselor & admin yes; other counselor, finance, faculty, management no', async () => {
-    expect((await request(app).get(`/api/v1/documents/${docId}/download`).set(as(c1))).status).toBe(200);
+  it('SEC-T14 identity documents: Administration staff and Super Admin only (decision 2)', async () => {
     expect((await request(app).get(`/api/v1/documents/${docId}/download`).set(as(adminTok))).status).toBe(200);
-    expect((await request(app).get(`/api/v1/documents/${docId}/download`).set(as(c2))).status).toBe(404);
-    expect((await request(app).get(`/api/v1/documents/${docId}/download`).set(as(await sessionFor('finmgr')))).status).toBe(403);
-    expect((await request(app).get(`/api/v1/documents/${docId}/download`).set(as(fac))).status).toBe(403);
-    expect((await request(app).get(`/api/v1/documents/${docId}/download`).set(as(await sessionFor('director')))).status).toBe(404); // object-level refusal looks like "missing"
+    expect((await request(app).get(`/api/v1/documents/${docId}/download`).set(as(saA))).status).toBe(200);
+    for (const u of ['counselor1', 'counselor2', 'salesmgr', 'finmgr', 'accounts', 'acadmgr', 'faculty2', 'examofficer', 'director']) {
+      expect((await request(app).get(`/api/v1/documents/${docId}/download`).set(as(await sessionFor(u)))).status, u).toBe(403);
+    }
     expect(await prisma.auditLog.count({ where: { action: 'DOWNLOAD', entity: 'document', entityId: docId } })).toBe(2);
-    const r = await request(app).get(`/api/v1/documents/${docId}/download`).set(as(c1));
+    const r = await request(app).get(`/api/v1/documents/${docId}/download`).set(as(adminTok));
     expect(r.headers['content-disposition']).toMatch(/^attachment/);
     expect(r.headers['x-content-type-options']).toBe('nosniff');
   });

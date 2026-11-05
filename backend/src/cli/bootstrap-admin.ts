@@ -2,7 +2,7 @@
  * One-time Super Administrator provisioning (R1, replaces the seeded "admin / Admin@12345").
  *
  *   npm run admin:bootstrap -- --email owner@nexoraed.com --name "Full Name" --username owner
- *   npm run admin:bootstrap -- --second --email second@nexoraed.com --name "Second Admin" --username admin2
+ *   npm run admin:bootstrap -- --second --nomination "MGMT-2026-014" --email second@nexoraed.com --name "Second Admin" --username admin2
  *
  * - Refuses when an active Super Administrator already exists (use --second exactly once for the second
  *   named Super Admin needed for approvals, SRS 22.2 / APR-03).
@@ -17,8 +17,11 @@ import { sha256 } from '../lib/util';
 
 export const ACTIVATION_MINUTES = 60;
 
-export async function bootstrapSuperAdmin(prisma: PrismaClient, a: { email: string; name: string; username: string; phone?: string; second?: boolean }, publicAppUrl: string) {
-  const d = z.object({ email: z.string().email(), name: z.string().min(2), username: z.string().min(3).regex(/^[a-z0-9._-]+$/i), phone: z.string().optional(), second: z.boolean().optional() }).parse(a);
+export async function bootstrapSuperAdmin(prisma: PrismaClient, a: { email: string; name: string; username: string; phone?: string; second?: boolean; nomination?: string }, publicAppUrl: string) {
+  const d = z.object({ email: z.string().email(), name: z.string().min(2), username: z.string().min(3).regex(/^[a-z0-9._-]+$/i), phone: z.string().optional(), second: z.boolean().optional(), nomination: z.string().optional() }).parse(a);
+  // Decision 4 (2026-11-05): the second Super Administrator must be nominated by Nexora management.
+  // The nomination reference (e.g. board resolution / signed letter id) is mandatory and is kept in the audit log.
+  if (d.second && (!d.nomination || d.nomination.trim().length < 5)) throw new Error('--second requires --nomination "<management nomination reference>".');
   return prisma.$transaction(async (tx) => {
     // Serialise concurrent bootstraps.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(4242001)`;
@@ -35,7 +38,7 @@ export async function bootstrapSuperAdmin(prisma: PrismaClient, a: { email: stri
     });
     const token = crypto.randomBytes(32).toString('base64url');
     await tx.passwordReset.create({ data: { userId: user.id, purpose: 'ENROLL', tokenHash: sha256(token), expiresAt: new Date(Date.now() + ACTIVATION_MINUTES * 60_000) } });
-    await tx.auditLog.create({ data: { action: 'BOOTSTRAP_SUPER_ADMIN', entity: 'user', entityId: user.id, newValues: { username: user.username, email: user.email, second: !!d.second } } });
+    await tx.auditLog.create({ data: { action: 'BOOTSTRAP_SUPER_ADMIN', entity: 'user', entityId: user.id, newValues: { username: user.username, email: user.email, second: !!d.second, nomination: d.nomination ?? null } } });
     return { userId: user.id, token, link: `${publicAppUrl.replace(/\/$/, '')}/reset-password?token=${token}&activate=1` };
   });
 }
@@ -47,7 +50,7 @@ function arg(name: string) {
 
 if (require.main === module) {
   const prisma = new PrismaClient();
-  bootstrapSuperAdmin(prisma, { email: arg('email') ?? '', name: arg('name') ?? '', username: arg('username') ?? '', phone: arg('phone'), second: process.argv.includes('--second') }, process.env.PUBLIC_APP_URL || 'http://localhost:5173')
+  bootstrapSuperAdmin(prisma, { email: arg('email') ?? '', name: arg('name') ?? '', username: arg('username') ?? '', phone: arg('phone'), second: process.argv.includes('--second'), nomination: arg('nomination') }, process.env.PUBLIC_APP_URL || 'http://localhost:5173')
     .then((r) => {
       console.log('Super Administrator created. Activation link (single use, expires in 60 minutes — share only with the account owner):');
       console.log(`  ${r.link}`);

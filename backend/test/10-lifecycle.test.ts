@@ -11,8 +11,9 @@ let counselor: string, salesmgr: string, accounts: string, examOfficer: string, 
 let courseId: string, batchId: string, studentId: string, studentToken: string;
 
 beforeAll(async () => {
-  [counselor, salesmgr, examOfficer] = await Promise.all(['counselor1', 'salesmgr', 'examofficer'].map((u) => login(u)));
-  [accounts, admin] = await Promise.all([sessionFor('accounts'), sessionFor('owner2')]); // finance staff + Super Admin (MFA roles)
+  counselor = await login('counselor1');
+  // MFA roles (Sales Manager and Exam Officer included per decision 3) use fixture sessions.
+  [salesmgr, examOfficer, accounts, admin] = await Promise.all([sessionFor('salesmgr'), sessionFor('examofficer'), sessionFor('accounts'), sessionFor('owner2')]);
   const c = await prisma.course.findUniqueOrThrow({ where: { code: 'FSD' }, include: { batches: true } });
   courseId = c.id;
   batchId = c.batches.find((b) => b.status === 'RUNNING')!.id;
@@ -133,14 +134,20 @@ describe('online exam', () => {
     expect((await request(app).post(`/api/v1/exams/exams/${ex.body.id}/schedule`).set(as(examOfficer))).status).toBe(200);
 
     const st = await prisma.student.findUniqueOrThrow({ where: { id: studentId }, include: { user: true } });
-    const bcrypt = (await import('bcryptjs')).default;
-    await prisma.user.update({ where: { id: st.userId! }, data: { passwordHash: await bcrypt.hash('Student@123', 4) } });
-    const temp = await login(st.studentCode.toLowerCase(), 'Student@123');
-    // Admission issues a temporary password: the portal is blocked until it is changed (ADM-01, server-enforced).
-    expect((await request(app).get('/api/v1/portal/me').set(as(temp))).body.error.code).toBe('PASSWORD_CHANGE_REQUIRED');
-    const changed = await request(app).post('/api/v1/auth/change-password').set(as(temp)).send({ currentPassword: 'Student@123', newPassword: 'Velvet#Comet-Trail-2026' });
-    expect(changed.status, JSON.stringify(changed.body)).toBe(200);
-    studentToken = changed.body.accessToken;
+    // Decision 8: admission creates the portal account WITHOUT a password and sends a single-use activation link.
+    const u = await prisma.user.findUniqueOrThrow({ where: { id: st.userId! } });
+    expect(u.passwordHash.startsWith('$2')).toBe(false);
+    expect(await prisma.passwordReset.count({ where: { userId: u.id, purpose: 'ENROLL', usedAt: null } })).toBe(1);
+    await new Promise((r) => setTimeout(r, 200));
+    const logs = await prisma.notificationLog.findMany({ where: { templateKey: 'admission.confirmed' } });
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs.every((l) => l.body.startsWith('[redacted'))).toBe(true); // the link never sits in the log
+    // The student activates with the link (a fresh link is issued here because only its hash is stored).
+    const { issueActivationLink } = await import('../src/lib/activation');
+    const act = await issueActivationLink(prisma, u.id);
+    const activated = await request(app).post('/api/v1/auth/reset-password').send({ token: act.token, newPassword: 'Velvet#Comet-Trail-2026' });
+    expect(activated.status, JSON.stringify(activated.body)).toBe(200);
+    studentToken = await login(st.studentCode.toLowerCase(), 'Velvet#Comet-Trail-2026');
 
     const start = await request(app).post(`/api/v1/portal/exams/${ex.body.id}/start`).set(as(studentToken)).send({ acknowledged: true });
     expect(start.status, JSON.stringify(start.body)).toBe(200);

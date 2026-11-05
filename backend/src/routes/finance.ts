@@ -9,7 +9,7 @@ import { audit } from '../lib/audit';
 import { getSettings } from '../lib/settings';
 import { money, toCsv } from '../lib/util';
 import { createApproval } from '../services/approvals';
-import { applyDiscount, createFeePlan, ledger, recordPayment, studentBalance } from '../services/finance';
+import { createFeePlan, ledger, recordPayment, studentBalance } from '../services/finance';
 import { notifyLater } from '../services/notify';
 
 const r = Router();
@@ -150,17 +150,10 @@ r.post('/discounts', can('finance:collect', 'finance:manage'), ah(async (req, re
   const amount = money(d.kind === 'PERCENT' ? (Number(plan.grossAmount) * Math.min(d.value, 100)) / 100 : d.value);
   if (amount > unpaid + 0.001) throw badRequest(`Discount (${amount}) cannot exceed the unpaid amount (${money(unpaid)}).`);
   const st = await prisma.student.findUniqueOrThrow({ where: { id: d.studentId } });
-  const s = await getSettings();
   const result = await prisma.$transaction(async (tx) => {
     const disc = await tx.discount.create({ data: { ...d, amount, feePlanId: plan.id, requestedById: req.user!.id } });
-    // FIN-09: a Finance Manager may apply a non-scholarship discount up to the configured limit without approval.
-    // This is an explicit, audited policy decision — not an auto-approved request. Everything else goes to the workflow.
-    const withinLimit = userCan(req, 'finance:manage') && amount <= s.finance.discountApprovalLimit && d.kind !== 'SCHOLARSHIP';
-    if (withinLimit) {
-      await applyDiscount(tx, disc.id, req.user!.id);
-      await audit(tx, req, 'DISCOUNT_APPLIED_WITHIN_LIMIT', 'discount', disc.id, null, { ...d, amount, limit: s.finance.discountApprovalLimit });
-      return { discount: disc, approval: null };
-    }
+    // FIN-09 / decision 5 (2026-11-05): every discount and scholarship goes through the configured approval
+    // workflow — there is no automatic exemption, for any role or amount.
     const appr = await createApproval(tx, {
       type: 'DISCOUNT', entityType: 'discount', entityId: disc.id,
       title: `${d.kind === 'SCHOLARSHIP' ? 'Scholarship' : 'Discount'} ${money(amount)} for ${st.fullName}: ${d.reason}`, payload: d, amount, requestedById: req.user!.id,

@@ -50,7 +50,8 @@ export const DEFAULT_ROLES: { key: string; name: string; permissions: Permission
  * approval (SRS §9 Rules, 22.2). The same roles must use MFA (SEC-06).
  */
 export const PRIVILEGED_ROLES = ['super_admin', 'admin', 'management', 'finance_manager', 'finance_staff'] as const;
-export const MFA_REQUIRED_ROLES = PRIVILEGED_ROLES;
+/** SEC-06 plus management decision 3 (2026-11-05): Sales Managers and Examination Officers must also use MFA. */
+export const MFA_REQUIRED_ROLES = [...PRIVILEGED_ROLES, 'sales_manager', 'exam_officer'] as const;
 export const isPrivilegedRole = (key: string) => (PRIVILEGED_ROLES as readonly string[]).includes(key);
 
 /** Valid permission keys that may be stored on a role or as a user override ('*' is reserved for super_admin). */

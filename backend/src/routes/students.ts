@@ -255,7 +255,7 @@ documentsRouter.post('/:id/verify', can('documents:verify'), ah(async (req, res)
   });
   res.json(d);
 }));
-documentsRouter.get('/:id/download', can('documents:verify', 'students:manage', 'leads:read'), ah(async (req, res) => {
+documentsRouter.get('/:id/download', can('documents:verify', 'students:manage'), ah(async (req, res) => {
   const d = await prisma.document.findUnique({ where: { id: req.params.id } });
   // S6 / FR-DOC-02: object-level check; out-of-scope documents look identical to missing ones.
   if (!d || !(await canAccessDocument(req.user!, d))) throw notFound('Document not found');

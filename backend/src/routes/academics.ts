@@ -2,7 +2,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
-import { batchScopeIds, facultyBatchIds } from '../lib/policy';
+import { batchScopeIds, canAccessBatch, facultyBatchIds } from '../lib/policy';
 import { ah, badRequest, conflict, forbidden, notFound } from '../lib/http';
 import { can, userCan } from '../lib/auth';
 import { audit } from '../lib/audit';
@@ -95,7 +95,20 @@ r.post('/subjects/:id/modules', can('academics:manage', 'masters:manage'), ah(as
 }));
 r.patch('/modules/:id', can('academics:manage', 'attendance:mark'), ah(async (req, res) => {
   const d = z.object({ name: z.string().optional(), completed: z.boolean().optional(), isActive: z.boolean().optional() }).parse(req.body);
-  res.json(await prisma.module.update({ where: { id: req.params.id }, data: d }));
+  const before = await prisma.module.findUnique({ where: { id: req.params.id } });
+  if (!before) throw notFound();
+  if (!userCan(req, 'academics:manage')) {
+    // Faculty: only modules of subjects they are allocated to, and only the completion flag.
+    const allocated = await prisma.facultyAllocation.count({ where: { facultyId: req.user!.id, subjectId: before.subjectId } });
+    if (!allocated) throw notFound();
+    if (d.name !== undefined || d.isActive !== undefined) throw forbidden('Only the Academic Manager can rename or deactivate modules.');
+  }
+  const m = await prisma.$transaction(async (tx) => {
+    const m = await tx.module.update({ where: { id: before.id }, data: d });
+    await audit(tx, req, 'UPDATE', 'module', m.id, before, d);
+    return m;
+  });
+  res.json(m);
 }));
 
 // ── Batches (ACD-03) ──
@@ -128,6 +141,7 @@ r.get('/batches', can('academics:read', 'leads:read', 'students:read', 'finance:
 }));
 
 r.get('/batches/:id', can('academics:read', 'students:read'), ah(async (req, res) => {
+  if (!(await canAccessBatch(req.user!, req.params.id))) throw notFound(); // faculty: own batches only
   const b = await prisma.batch.findUnique({
     where: { id: req.params.id },
     include: {
@@ -370,29 +384,48 @@ r.get('/batches/:id/attendance-summary', can('academics:read', 'attendance:mark'
 
 // ── Materials (ACD-10) ──
 r.get('/materials', can('academics:read', 'materials:manage'), ah(async (req, res) => {
-  res.json({ items: await prisma.material.findMany({ where: { ...(req.query.batchId && { batchId: String(req.query.batchId) }), ...(req.query.courseId && { courseId: String(req.query.courseId) }) }, orderBy: { createdAt: 'desc' } }) });
+  const scope = await batchScopeIds(req.user!);
+  res.json({ items: await prisma.material.findMany({ where: { ...(req.query.batchId && { batchId: String(req.query.batchId) }), ...(req.query.courseId && { courseId: String(req.query.courseId) }), ...(scope && { OR: [{ batchId: { in: scope } }, { uploadedById: req.user!.id }] }) }, orderBy: { createdAt: 'desc' } }) });
 }));
 r.post('/materials', can('materials:manage'), ah(async (req, res) => {
   const d = z.object({ courseId: z.string(), batchId: z.string().optional().nullable(), subjectId: z.string().optional().nullable(), title: z.string().min(2), type: z.enum(['PDF', 'DOC', 'LINK', 'VIDEO']), url: z.string().url() }).parse(req.body);
-  const m = await prisma.material.create({ data: { ...d, uploadedById: req.user!.id } });
+  if (d.batchId ? !(await canAccessBatch(req.user!, d.batchId)) : !userCan(req, 'academics:manage')) throw forbidden('You can only share materials with your own batches.');
+  const m = await prisma.$transaction(async (tx) => {
+    const m = await tx.material.create({ data: { ...d, uploadedById: req.user!.id } });
+    await audit(tx, req, 'CREATE', 'material', m.id, null, d);
+    return m;
+  });
   res.status(201).json(m);
 }));
 r.delete('/materials/:id', can('materials:manage'), ah(async (req, res) => {
-  await prisma.material.delete({ where: { id: req.params.id } });
+  const m = await prisma.material.findUnique({ where: { id: req.params.id } });
+  if (!m || (!userCan(req, 'academics:manage') && m.uploadedById !== req.user!.id)) throw notFound();
+  await prisma.$transaction(async (tx) => {
+    await tx.material.delete({ where: { id: m.id } });
+    await audit(tx, req, 'DELETE', 'material', m.id, m, null);
+  });
   res.json({ ok: true });
 }));
 
 // ── Assignments (ACD-11) ──
 r.get('/assignments', can('academics:read', 'materials:manage'), ah(async (req, res) => {
-  res.json({ items: await prisma.assignment.findMany({ where: { ...(req.query.batchId && { batchId: String(req.query.batchId) }) }, orderBy: { dueAt: 'desc' }, include: { _count: { select: { submissions: true } } } }) });
+  const scope = await batchScopeIds(req.user!);
+  res.json({ items: await prisma.assignment.findMany({ where: { ...(req.query.batchId && { batchId: String(req.query.batchId) }), ...(scope && { batchId: { in: scope } }) }, orderBy: { dueAt: 'desc' }, include: { _count: { select: { submissions: true } } } }) });
 }));
 r.post('/assignments', can('materials:manage'), ah(async (req, res) => {
   const d = z.object({ batchId: z.string(), subjectId: z.string().optional().nullable(), title: z.string().min(2), description: z.string().optional(), dueAt: z.coerce.date(), maxMarks: z.number().int().min(1).default(100) }).parse(req.body);
-  const a = await prisma.assignment.create({ data: { ...d, createdById: req.user!.id } });
+  if (!(await canAccessBatch(req.user!, d.batchId))) throw forbidden('You can only set assignments for your own batches.');
+  const a = await prisma.$transaction(async (tx) => {
+    const a = await tx.assignment.create({ data: { ...d, createdById: req.user!.id } });
+    await audit(tx, req, 'CREATE', 'assignment', a.id, null, d);
+    return a;
+  });
   notifyBatch(d.batchId, 'assignment.created', { title: d.title, due: d.dueAt.toLocaleString('en-IN') });
   res.status(201).json(a);
 }));
 r.get('/assignments/:id/submissions', can('materials:manage'), ah(async (req, res) => {
+  const asg = await prisma.assignment.findUnique({ where: { id: req.params.id } });
+  if (!asg || !(await canAccessBatch(req.user!, asg.batchId))) throw notFound();
   const subs = await prisma.submission.findMany({ where: { assignmentId: req.params.id }, orderBy: { submittedAt: 'asc' } });
   const students = await prisma.student.findMany({ where: { id: { in: subs.map((s) => s.studentId) } }, select: { id: true, fullName: true, studentCode: true } });
   const m = Object.fromEntries(students.map((s) => [s.id, s]));
@@ -400,9 +433,15 @@ r.get('/assignments/:id/submissions', can('materials:manage'), ah(async (req, re
 }));
 r.patch('/submissions/:id', can('materials:manage'), ah(async (req, res) => {
   const d = z.object({ marks: z.number().min(0), feedback: z.string().optional() }).parse(req.body);
-  const sub = await prisma.submission.findUniqueOrThrow({ where: { id: req.params.id }, include: { assignment: true } });
+  const sub = await prisma.submission.findUnique({ where: { id: req.params.id }, include: { assignment: true } });
+  if (!sub || !(await canAccessBatch(req.user!, sub.assignment.batchId))) throw notFound();
   if (d.marks > sub.assignment.maxMarks) throw badRequest(`Marks cannot exceed ${sub.assignment.maxMarks}.`);
-  res.json(await prisma.submission.update({ where: { id: sub.id }, data: d }));
+  const u = await prisma.$transaction(async (tx) => {
+    const u = await tx.submission.update({ where: { id: sub.id }, data: d });
+    await audit(tx, req, 'GRADE', 'submission', sub.id, { marks: sub.marks, feedback: sub.feedback }, d);
+    return u;
+  });
+  res.json(u);
 }));
 
 export default r;

@@ -29,29 +29,34 @@ function placeholders(tpl: string) {
   return [...tpl.matchAll(/\{\{\s*([\w.]+)\s*\}\}/g)].map((m) => m[1]);
 }
 
-export async function notify(templateKey: string, to: Recipient, vars: Record<string, unknown>, opts: { channels?: Channel[]; link?: string } = {}) {
+/**
+ * opts.sensitive: the message carries a credential (activation / reset link). It is never stored in an in-app
+ * notification, and the notification log keeps a redacted body (LOG-02) — the log is readable by administrators.
+ */
+export async function notify(templateKey: string, to: Recipient, vars: Record<string, unknown>, opts: { channels?: Channel[]; link?: string; sensitive?: boolean } = {}) {
   const tpl = await prisma.notificationTemplate.findUnique({ where: { key: templateKey } });
   if (!tpl || !tpl.isActive) return;
   const body = render(tpl.body, vars);
   const subject = render(tpl.subject || tpl.name, vars);
-  const channels = (opts.channels ?? (tpl.channels as Channel[])).filter((c) => tpl.channels.includes(c));
+  const channels = (opts.channels ?? (tpl.channels as Channel[])).filter((c) => tpl.channels.includes(c) && !(opts.sensitive && c === 'IN_APP'));
   const results: Record<string, string> = {};
+  const logBody = opts.sensitive ? `[redacted: ${templateKey} contains a single-use link]` : body;
 
   for (const ch of channels) {
     try {
       if (ch === 'IN_APP') {
         if (!to.userId) continue;
         await prisma.notification.create({ data: { userId: to.userId, title: subject, body, link: opts.link } });
-        await log(ch, to.userId, templateKey, body, 'SENT');
+        await log(ch, to.userId, templateKey, logBody, 'SENT');
       } else if (ch === 'EMAIL') {
         if (!to.email) continue;
         const m = mailer();
         if (!m) {
-          await log(ch, to.email, templateKey, body, 'SKIPPED', 'SMTP not configured');
+          await log(ch, to.email, templateKey, logBody, 'SKIPPED', 'SMTP not configured');
           continue;
         }
         const info = await m.sendMail({ from: config.smtp.from, to: to.email, subject, text: body });
-        await log(ch, to.email, templateKey, body, 'SENT', undefined, info.messageId);
+        await log(ch, to.email, templateKey, logBody, 'SENT', undefined, info.messageId);
       } else if (ch === 'WHATSAPP') {
         if (!to.phone) continue;
         const r = await sendWhatsApp({
@@ -64,12 +69,12 @@ export async function notify(templateKey: string, to: Recipient, vars: Record<st
             ? { name: tpl.waTemplateName, language: tpl.waLanguage, category: tpl.waCategory, params: placeholders(tpl.body).map((k) => render(`{{${k}}}`, vars)) }
             : undefined,
         });
-        await log(ch, to.phone, templateKey, body, 'SENT', undefined, `cw:${r.conversationId}:${r.messageId}`);
+        await log(ch, to.phone, templateKey, logBody, 'SENT', undefined, `cw:${r.conversationId}:${r.messageId}`);
       }
       results[ch] = 'SENT';
     } catch (e: any) {
       results[ch] = 'FAILED';
-      await log(ch, to.phone || to.email || to.userId || '-', templateKey, body, e?.code === 'INTEGRATION_DISABLED' ? 'SKIPPED' : 'FAILED', String(e?.message || e));
+      await log(ch, to.phone || to.email || to.userId || '-', templateKey, logBody, e?.code === 'INTEGRATION_DISABLED' ? 'SKIPPED' : 'FAILED', String(e?.message || e));
     }
   }
   return results;

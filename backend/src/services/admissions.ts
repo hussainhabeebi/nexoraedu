@@ -1,11 +1,12 @@
 /** Application → Admission → Student conversion without re-entry (CRM-12/13/14, STU-01). */
-import bcrypt from 'bcryptjs';
 import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { badRequest, conflict } from '../lib/http';
 import { nextNumber } from '../lib/sequence';
 import { getSettings } from '../lib/settings';
-import { normalizeEmail, normalizePhone, randomPassword } from '../lib/util';
+import { normalizeEmail, normalizePhone } from '../lib/util';
+import { UNUSABLE_PASSWORD } from '../lib/password';
+import { issueActivationLink } from '../lib/activation';
 import { createFeePlan } from './finance';
 import { notifyLater } from './notify';
 
@@ -65,6 +66,9 @@ export async function assertNoDuplicateStudent(tx: Tx, phone: string, email: str
 
 /** STU-09 capacity + course match. */
 export async function assertBatchAvailable(tx: Tx, batchId: string, courseId: string) {
+  // Lock the batch row so parallel admissions/transfers cannot overfill it (STU-09). Inside a transaction the
+  // lock is held until commit; outside one (pre-checks) it is released immediately and the check is advisory.
+  await tx.$queryRaw`SELECT id FROM batches WHERE id = ${batchId} FOR UPDATE`;
   const b = await tx.batch.findUnique({ where: { id: batchId }, include: { _count: { select: { students: { where: { status: { in: ['ADMITTED', 'ACTIVE', 'ON_HOLD'] } } } } } } });
   if (!b) throw badRequest('Selected batch does not exist.');
   if (b.courseId !== courseId) throw badRequest('Selected batch does not belong to the chosen course.');
@@ -84,7 +88,6 @@ export async function admitApplication(tx: Tx, applicationId: string, opts: { ba
 
   const s = await getSettings();
   const studentCode = await nextNumber(`student:${new Date().getFullYear()}`, s.ids.student, tx);
-  const tempPassword = randomPassword();
   const studentRole = await tx.role.findUniqueOrThrow({ where: { key: 'student' } });
   const emailN = normalizeEmail(p.email)!;
   const existingUser = await tx.user.findUnique({ where: { email: emailN } });
@@ -95,8 +98,9 @@ export async function admitApplication(tx: Tx, applicationId: string, opts: { ba
       username: studentCode.toLowerCase(),
       name: p.fullName,
       phone: p.phone,
-      passwordHash: await bcrypt.hash(tempPassword, 10),
-      mustChangePassword: true,
+      // Decision 8: no temporary password; the student activates the portal account with a single-use link.
+      passwordHash: UNUSABLE_PASSWORD,
+      mustChangePassword: false,
       roles: { create: { roleId: studentRole.id } },
     },
   });
@@ -131,10 +135,12 @@ export async function admitApplication(tx: Tx, applicationId: string, opts: { ba
   await tx.studentHistory.create({ data: { studentId: student.id, type: 'STATUS', message: `Admitted to ${student.course.name}${student.batch ? ` (${student.batch.code})` : ''}`, userId: actorId } });
   await createFeePlan(tx, { studentId: student.id, courseId: app.courseId, installments: opts.installments, startDate: new Date(), userId: actorId });
 
+  const act = await issueActivationLink(tx, user.id);
   notifyLater(
     'admission.confirmed',
     { userId: user.id, name: student.fullName, email: student.email, phone: student.phone, conversationId: app.lead?.chatwootConversationId },
-    { name: student.fullName, studentCode, course: student.course.name, batch: student.batch?.name ?? 'to be allotted', username: studentCode.toLowerCase(), password: tempPassword, portalUrl: process.env.PUBLIC_APP_URL ?? '' },
+    { name: student.fullName, studentCode, course: student.course.name, batch: student.batch?.name ?? 'to be allotted', username: studentCode.toLowerCase(), link: act.link, hours: act.hours },
+    { channels: ['EMAIL', 'WHATSAPP'], sensitive: true },
   );
   return student.id;
 }

@@ -345,7 +345,8 @@ r.post('/leads/:id/merge', can('leads:delete'), ah(async (req, res) => {
 }));
 
 // ── Applications (CRM-12) ──
-r.get('/applications', can('leads:read', 'students:read'), ah(async (req, res) => {
+// SRS 6.12: CRM data (applications) is not for Finance/Academic/Exam roles.
+r.get('/applications', can('leads:read', 'students:manage'), ah(async (req, res) => {
   const { skip, take, page, pageSize } = paging(req.query);
   const where: Prisma.ApplicationWhereInput = {
     ...(req.query.status && { status: String(req.query.status) as any }),
@@ -360,7 +361,7 @@ r.get('/applications', can('leads:read', 'students:read'), ah(async (req, res) =
   res.json({ items: items.map((a) => ({ ...a, courseName: cn[a.courseId] })), total, page, pageSize });
 }));
 
-r.get('/applications/:id', can('leads:read', 'students:read'), ah(async (req, res) => {
+r.get('/applications/:id', can('leads:read', 'students:manage'), ah(async (req, res) => {
   const a = await prisma.application.findUnique({ where: { id: req.params.id }, include: { lead: { select: { id: true, code: true, name: true, ownerId: true } }, documents: true } });
   if (!a) throw notFound('Application not found');
   if (!userCan(req, 'leads:read_all') && !userCan(req, 'students:manage') && a.lead?.ownerId !== req.user!.id) throw forbidden();

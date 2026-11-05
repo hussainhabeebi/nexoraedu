@@ -1,6 +1,6 @@
 /** Wire approval types to the domain actions they unlock (SRS §22). */
 import { registerApprovalHandler } from './approvals';
-import { admitApplication } from './admissions';
+import { admitApplication, assertBatchAvailable } from './admissions';
 import { applyDiscount, cancelPayment } from './finance';
 import { getSettings } from '../lib/settings';
 import { notifyLater } from './notify';
@@ -60,6 +60,7 @@ export function registerHandlers() {
     onApprove: async (tx, r, actor) => {
       const st = await tx.student.findUniqueOrThrow({ where: { id: r.entityId }, include: { batch: true } });
       const to = await tx.batch.findUniqueOrThrow({ where: { id: r.payload.toBatchId } });
+      await assertBatchAvailable(tx, to.id, to.courseId); // capacity re-checked (and locked) at approval time
       await tx.student.update({ where: { id: st.id }, data: { batchId: to.id, courseId: to.courseId } });
       await tx.studentHistory.create({ data: { studentId: st.id, type: 'BATCH', message: `Transferred ${st.batch?.code ?? '—'} → ${to.code}. Reason: ${r.payload.reason}`, userId: actor } });
     },

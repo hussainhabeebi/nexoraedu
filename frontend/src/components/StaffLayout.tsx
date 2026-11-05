@@ -19,7 +19,7 @@ const GROUPS: { title: string; items: Item[] }[] = [
     items: [
       { to: '/staff/leads', label: 'Leads', icon: UserPlus, perm: ['leads:read'] },
       { to: '/staff/follow-ups', label: 'Follow-ups', icon: PhoneCall, perm: ['leads:read'] },
-      { to: '/staff/applications', label: 'Applications', icon: FileText, perm: ['leads:read', 'students:read'] },
+      { to: '/staff/applications', label: 'Applications', icon: FileText, perm: ['leads:read', 'students:manage'] },
       { to: '/staff/whatsapp', label: 'WhatsApp inbox', icon: MessageCircle, perm: ['whatsapp:send'] },
     ],
   },

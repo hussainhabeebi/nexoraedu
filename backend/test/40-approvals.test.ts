@@ -87,16 +87,15 @@ describe('SEC-T12 segregation of duties', () => {
     expect((await prisma.discount.findUniqueOrThrow({ where: { id: d.body.discount.id } })).status).toBe('APPLIED');
   });
 
-  it('within-limit discount by a Finance Manager is an explicit audited policy, not an auto-approval', async () => {
-    const n = await prisma.approvalRequest.count();
+  it('every discount needs the configured approval — no automatic exemption, even ₹100 by a Finance Manager (decision 5)', async () => {
     const d = await request(app).post('/api/v1/finance/discounts').set(as(finmgr)).send({ studentId, kind: 'FIXED', value: 100, reason: 'Early bird' });
     expect(d.status).toBe(201);
-    expect(d.body.approval).toBeNull();
-    expect(await prisma.approvalRequest.count()).toBe(n);
-    expect(await prisma.auditLog.count({ where: { action: 'DISCOUNT_APPLIED_WITHIN_LIMIT', entityId: d.body.discount.id } })).toBe(1);
-    // Finance Staff never self-apply, even small amounts.
-    const s = await request(app).post('/api/v1/finance/discounts').set(as(accounts)).send({ studentId, kind: 'FIXED', value: 100, reason: 'Small one' });
-    expect(s.body.approval?.status).toBe('PENDING');
+    expect(d.body.approval.status).toBe('PENDING');
+    expect((await prisma.discount.findUniqueOrThrow({ where: { id: d.body.discount.id } })).status).toBe('PENDING_APPROVAL');
+    expect((await request(app).post(`/api/v1/approvals/${d.body.approval.id}/act`).set(as(finmgr)).send({ action: 'APPROVE' })).status).toBe(403); // own request
+    expect((await request(app).post(`/api/v1/approvals/${d.body.approval.id}/act`).set(as(sa)).send({ action: 'APPROVE' })).status).toBe(200);
+    expect((await prisma.discount.findUniqueOrThrow({ where: { id: d.body.discount.id } })).status).toBe('APPLIED');
+    expect(await prisma.auditLog.count({ where: { action: 'DISCOUNT_APPLIED_WITHIN_LIMIT' } })).toBe(0);
   });
 
   it('concurrent decisions: exactly one succeeds', async () => {

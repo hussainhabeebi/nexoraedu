@@ -282,7 +282,7 @@ r.post('/forgot-password', limiter, ah(async (req, res) => {
     const token = randomToken(32);
     await prisma.passwordReset.create({ data: { userId: user.id, purpose: 'RESET', tokenHash: sha256(token), expiresAt: new Date(Date.now() + 30 * 60_000) } });
     const link = `${config.publicAppUrl}/reset-password?token=${token}`;
-    notify('auth.password_reset', { userId: user.id, name: user.name, email: user.email, phone: user.phone }, { name: user.name, link }, { channels: ['EMAIL', 'WHATSAPP'] }).catch(() => undefined);
+    notify('auth.password_reset', { userId: user.id, name: user.name, email: user.email, phone: user.phone }, { name: user.name, link }, { channels: ['EMAIL', 'WHATSAPP'], sensitive: true }).catch(() => undefined);
   }
   res.json({ ok: true, message: 'If an account exists, a reset link has been sent to the registered email / WhatsApp.' });
 }));

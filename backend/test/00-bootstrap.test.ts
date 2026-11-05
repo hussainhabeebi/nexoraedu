@@ -63,8 +63,12 @@ describe('R1 Super Administrator bootstrap', () => {
 
   it('SEC-T04 refuses a second bootstrap while a Super Admin exists; --second works exactly once', async () => {
     await expect(bootstrapSuperAdmin(prisma as any, { email: 'x@example.invalid', name: 'Intruder', username: 'intruder' }, 'https://x')).rejects.toThrow(/already exists/);
-    await bootstrapSuperAdmin(prisma as any, { email: 'second@example.invalid', name: 'Second Admin', username: 'owner2', second: true }, 'https://x');
-    await expect(bootstrapSuperAdmin(prisma as any, { email: 'third@example.invalid', name: 'Third Admin', username: 'owner3', second: true }, 'https://x')).rejects.toThrow(/exactly one/);
+    // Decision 4: the second Super Admin needs a recorded management nomination.
+    await expect(bootstrapSuperAdmin(prisma as any, { email: 'second@example.invalid', name: 'Second Admin', username: 'owner2', second: true }, 'https://x')).rejects.toThrow(/nomination/);
+    await bootstrapSuperAdmin(prisma as any, { email: 'second@example.invalid', name: 'Second Admin', username: 'owner2', second: true, nomination: 'TEST-NOMINATION-001' }, 'https://x');
+    const row = await prisma.auditLog.findFirstOrThrow({ where: { action: 'BOOTSTRAP_SUPER_ADMIN', newValues: { path: ['second'], equals: true } } });
+    expect((row.newValues as any).nomination).toBe('TEST-NOMINATION-001');
+    await expect(bootstrapSuperAdmin(prisma as any, { email: 'third@example.invalid', name: 'Third Admin', username: 'owner3', second: true, nomination: 'TEST-NOMINATION-002' }, 'https://x')).rejects.toThrow(/exactly one/);
   });
 
   it('SEC-T04 activation enforces the password policy and is single-use', async () => {

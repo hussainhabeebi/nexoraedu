@@ -106,8 +106,8 @@ export default function App() {
           <Route path="leads" element={P(['leads:read'], <Leads />)} />
           <Route path="leads/:id" element={P(['leads:read'], <LeadDetail />)} />
           <Route path="follow-ups" element={P(['leads:read'], <FollowUps />)} />
-          <Route path="applications" element={P(['leads:read', 'students:read'], <Applications />)} />
-          <Route path="applications/:id" element={P(['leads:read', 'students:read'], <ApplicationDetail />)} />
+          <Route path="applications" element={P(['leads:read', 'students:manage'], <Applications />)} />
+          <Route path="applications/:id" element={P(['leads:read', 'students:manage'], <ApplicationDetail />)} />
           <Route path="students" element={P(['students:read', 'students:read_batch', 'students:read_own'], <Students />)} />
           <Route path="students/new" element={P(['students:manage'], <StudentNew />)} />
           <Route path="students/:id" element={P(['students:read', 'students:read_batch', 'students:read_own'], <StudentProfile />)} />

@@ -35,7 +35,7 @@ export async function seedReference(prisma: PrismaClient) {
 
   // Notification templates (FR-NTF-02). Set waTemplateName to an approved WhatsApp template to send outside the 24h window.
   const T: [string, string, string, string][] = [
-    ['admission.confirmed', 'Admission confirmed', 'Welcome to Nexora Academy, {{name}}!', 'Hi {{name}}, your admission to {{course}} ({{batch}}) is confirmed. Student ID: {{studentCode}}. Portal login: {{username}} / {{password}} at {{portalUrl}}/login. Please change your password on first login.'],
+    ['admission.confirmed', 'Admission confirmed', 'Welcome to Nexora Academy, {{name}}!', 'Hi {{name}}, your admission to {{course}} ({{batch}}) is confirmed. Student ID: {{studentCode}}. Activate your student portal account (username {{username}}) with this single-use link, valid {{hours}} hours: {{link}}'],
     ['application.received', 'Application received', 'Application {{code}} received', 'Hi {{name}}, we have received your application {{code}} for {{course}}. Our counselor will contact you soon. Track it any time on our website.'],
     ['enquiry.received', 'Enquiry received', 'Thanks for contacting Nexora Academy', 'Hi {{name}}, thank you for your interest in Nexora Academy! A counselor will reach out shortly. Reply here on WhatsApp for any questions.'],
     ['payment.received', 'Payment receipt', 'Payment received — {{receipt}}', 'Hi {{name}}, we received ₹{{amount}} on {{date}} (receipt {{receipt}}). Balance outstanding: ₹{{balance}}. Thank you!'],
@@ -52,10 +52,10 @@ export async function seedReference(prisma: PrismaClient) {
     ['security.email_changed', 'Security: email changed', 'Your Nexora sign-in email was changed', 'Hi {{name}}, the sign-in email for your Nexora account was changed to {{newEmail}}. If you did not request this, contact the academy immediately.'],
     ['security.account_locked', 'Security: account locked', 'Your Nexora account was locked', 'Hi {{name}}, your Nexora account was locked for {{minutes}} minutes after several failed sign-in attempts. If this was not you, contact the academy.'],
     ['security.session_reuse', 'Security: suspicious sign-in', 'Suspicious activity on your Nexora account', 'Hi {{name}}, we detected reuse of an old sign-in token and signed you out everywhere. If this was not you, change your password.'],
-    ['user.welcome', 'Staff welcome', 'Your Nexora portal account', 'Hi {{name}}, your Nexora staff account is ready. Username: {{username}}, temporary password: {{password}}. You will be asked to change it at first login.'],
+    ['user.welcome', 'Staff welcome', 'Your Nexora portal account', 'Hi {{name}}, your Nexora staff account (username {{username}}) is ready. Set your password with this single-use link, valid {{hours}} hours: {{link}}. Administrative roles will then set up an authenticator app.'],
   ];
   for (const [key, name, subject, body] of T) {
-    await prisma.notificationTemplate.upsert({ where: { key }, create: { key, name, subject, body, channels: key.startsWith('timetable') || key === 'assignment.created' ? ['IN_APP'] : ['IN_APP', 'EMAIL', 'WHATSAPP'] }, update: {} });
+    await prisma.notificationTemplate.upsert({ where: { key }, create: { key, name, subject, body, channels: key.startsWith('timetable') || key === 'assignment.created' ? ['IN_APP'] : ['admission.confirmed', 'user.welcome', 'auth.password_reset'].includes(key) ? ['EMAIL', 'WHATSAPP'] : ['IN_APP', 'EMAIL', 'WHATSAPP'] }, update: {} });
   }
 
   // Approval workflows (SRS §22)

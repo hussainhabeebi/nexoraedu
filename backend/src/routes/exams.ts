@@ -6,7 +6,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { ah, badRequest, conflict, notFound, paging } from '../lib/http';
 import { can, userCan } from '../lib/auth';
-import { batchScopeIds } from '../lib/policy';
+import { batchScopeIds, canAccessBatch } from '../lib/policy';
 import { audit } from '../lib/audit';
 import { nextNumber } from '../lib/sequence';
 import { getSettings } from '../lib/settings';
@@ -324,7 +324,9 @@ r.post('/exams/:id/publish', can('exams:manage'), ah(async (req, res) => {
 // EXM-18 correction via approval
 r.post('/results/:id/correction', can('exams:manage', 'materials:manage'), ah(async (req, res) => {
   const { newMarks, reason, evidence } = z.object({ newMarks: z.coerce.number().min(0), reason: z.string().min(5), evidence: z.string().min(3) }).parse(req.body);
-  const rs = await prisma.result.findUniqueOrThrow({ where: { id: req.params.id }, include: { exam: true, student: true } });
+  const rs = await prisma.result.findUnique({ where: { id: req.params.id }, include: { exam: true, student: true } });
+  // Faculty may request corrections only for exams of their own batches (22.7).
+  if (!rs || (!userCan(req, 'exams:manage') && !(await canAccessBatch(req.user!, rs.exam.batchId)))) throw notFound('Result not found');
   if (newMarks > rs.exam.totalMarks) throw badRequest(`Marks cannot exceed ${rs.exam.totalMarks}.`);
   const a = await prisma.$transaction((tx) => createApproval(tx, { type: 'RESULT_CORRECTION', entityType: 'result', entityId: rs.id, title: `Result correction: ${rs.student.fullName} — ${rs.exam.title} (${rs.marks} → ${newMarks})`, payload: { oldMarks: rs.marks, newMarks, reason, evidence }, requestedById: req.user!.id }));
   res.json({ approval: a });
@@ -372,6 +374,10 @@ export async function certificatePdf(id: string, out: NodeJS.WritableStream) {
   doc.end();
 }
 r.get('/certificates/:id/pdf', can('exams:read'), ah(async (req, res) => {
+  if (!userCan(req, 'exams:manage')) {
+    const c = await prisma.certificate.findUnique({ where: { id: req.params.id }, include: { student: { select: { batchId: true } } } });
+    if (!c || !(await canAccessBatch(req.user!, c.student.batchId))) throw notFound('Certificate not found');
+  }
   res.setHeader('Content-Type', 'application/pdf');
   await certificatePdf(req.params.id, res);
 }));

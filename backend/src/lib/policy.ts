@@ -48,25 +48,18 @@ export async function batchScopeIds(u: AuthUser): Promise<string[] | null> {
 }
 
 /**
- * Identity documents (ID proofs, marksheets — often of minors) follow least privilege (FR-DOC-02, SEC-09):
- *   documents:verify / students:manage (Administrator) → all
- *   leads:assign (Sales Manager, admission review)     → all application/admission documents
- *   lead owner (Counselor)                             → documents of their own leads' applications and students
- *   the student                                         → own documents
- * Finance, Academic, Faculty, Exam and Management roles do not need identity documents and are refused
- * (Management holds leads:read_all for reporting, which deliberately does NOT grant document access).
+ * Identity documents (ID proofs, marksheets — often of minors), FR-DOC-02 / SEC-09.
+ * Management decision 2 (2026-11-05): ONLY authorised Administration staff (documents:verify or
+ * students:manage) and the Super Administrator. Counselors, Sales, Finance, Academic, Faculty, Exam,
+ * Management and students themselves are refused.
  */
-export async function canAccessDocument(u: AuthUser, doc: { studentId: string | null; applicationId: string | null }): Promise<boolean> {
-  if (can(u, 'documents:verify') || can(u, 'students:manage') || can(u, 'leads:assign')) return true;
-  if (doc.studentId && u.studentId === doc.studentId) return true;
-  if (!can(u, 'leads:read')) return false;
-  if (doc.studentId) {
-    const n = await prisma.student.count({ where: { id: doc.studentId, lead: { ownerId: u.id } } });
-    if (n) return true;
-  }
-  if (doc.applicationId) {
-    const n = await prisma.application.count({ where: { id: doc.applicationId, lead: { ownerId: u.id } } });
-    if (n) return true;
-  }
-  return false;
+export async function canAccessDocument(u: AuthUser, _doc: { studentId: string | null; applicationId: string | null }): Promise<boolean> {
+  return can(u, 'documents:verify') || can(u, 'students:manage');
+}
+
+/** Batch-level access for academic records (materials, assignments, grading, corrections). */
+export async function canAccessBatch(u: AuthUser, batchId: string | null | undefined): Promise<boolean> {
+  const scope = await batchScopeIds(u);
+  if (!scope) return true;
+  return !!batchId && scope.includes(batchId);
 }

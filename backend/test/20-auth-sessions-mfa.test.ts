@@ -70,6 +70,14 @@ describe('SEC-T18 MFA for privileged roles', () => {
     expect(await prisma.loginLog.count({ where: { userId: u.id, event: 'MFA_FAIL' } })).toBeGreaterThanOrEqual(2);
   });
 
+  it('Sales Manager and Examination Officer must enrol MFA (decision 3)', async () => {
+    for (const u of ['salesmgr', 'examofficer']) {
+      const r = await request(app).post('/api/v1/auth/login').send({ identifier: u, password: DEMO_PASSWORD });
+      expect(r.body.mfaEnrollmentRequired, u).toBe(true);
+      expect((await request(app).get('/api/v1/crm/leads').set(as(r.body.accessToken))).body.error.code, u).toBe('MFA_ENROLLMENT_REQUIRED');
+    }
+  });
+
   it('non-privileged roles are not forced to enrol', async () => {
     const r = await request(app).post('/api/v1/auth/login').send({ identifier: 'counselor2', password: DEMO_PASSWORD });
     expect(r.body.mfaEnrollmentRequired).toBe(false);
