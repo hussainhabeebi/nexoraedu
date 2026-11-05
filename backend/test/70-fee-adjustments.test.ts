@@ -368,3 +368,30 @@ describe('Receipt cancellation keeps refunds covered (B1, R8, FIN-06/FIN-11)', (
     await clean(st.id);
   });
 });
+
+describe('Discount plan choice (students with several plans)', () => {
+  const discount = (body: any) => request(app).post('/api/v1/finance/discounts').set(as(accounts)).send({ kind: 'FIXED', reason: 'Merit (synthetic)', ...body });
+
+  it('targets the chosen plan; defaults to the newest; another student’s plan is refused', async () => {
+    const { st, planId: oldPlan } = await studentWithPlan(2);
+    const t = await request(app).post(`/api/v1/students/${st.id}/transfer`).set(as(office)).send({ toBatchId: dmBatch, reason: 'Course change (synthetic)' });
+    await approve(t.body.approval.id, acad);
+    const np = await request(app).post(`/api/v1/finance/students/${st.id}/fee-plan`).set(as(finmgr)).send({ installments: 1 });
+    expect(np.status).toBe(201);
+    const chosen = await discount({ studentId: st.id, feePlanId: oldPlan, value: 700 });
+    expect(chosen.status, JSON.stringify(chosen.body)).toBe(201);
+    expect(chosen.body.discount.feePlanId).toBe(oldPlan);
+    await approveAll(chosen.body.approval.id);
+    expect(Number((await prisma.feePlan.findUniqueOrThrow({ where: { id: oldPlan } })).discount)).toBe(700);
+    expect(Number((await prisma.feePlan.findUniqueOrThrow({ where: { id: np.body.id } })).discount)).toBe(0);
+    const dflt = await discount({ studentId: st.id, value: 300 });
+    expect(dflt.body.discount.feePlanId).toBe(np.body.id); // unchanged default: newest plan
+    const other = await studentWithPlan(1);
+    expect((await discount({ studentId: st.id, feePlanId: other.planId, value: 10 })).status).toBe(404);
+    // The limit is the chosen plan's unpaid amount.
+    const newOpen = (await insts(np.body.id)).reduce((s, i) => s + Number(i.amount) - Number(i.paidAmount), 0);
+    expect((await discount({ studentId: st.id, feePlanId: np.body.id, value: newOpen + 1 })).status).toBe(400);
+    expect(await prisma.auditLog.count({ where: { entity: 'discount', entityId: chosen.body.discount.id, action: 'CREATE' } })).toBe(1);
+    await clean(st.id);
+  });
+});

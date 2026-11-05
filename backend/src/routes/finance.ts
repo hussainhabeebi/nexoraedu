@@ -156,9 +156,13 @@ r.post('/payments/:id/cancel-request', can('finance:collect'), ah(async (req, re
 
 // FIN-09/10 discounts & scholarships
 r.post('/discounts', can('finance:collect', 'finance:manage'), ah(async (req, res) => {
-  const d = z.object({ studentId: z.string(), kind: z.enum(['FIXED', 'PERCENT', 'SCHOLARSHIP']), value: z.coerce.number().positive(), reason: z.string().min(3) }).parse(req.body);
-  const plan = await prisma.feePlan.findFirst({ where: { studentId: d.studentId }, orderBy: { createdAt: 'desc' }, include: { installments: true } });
-  if (!plan) throw badRequest('Student has no fee plan.');
+  const { feePlanId, ...d } = z.object({ studentId: z.string(), feePlanId: z.string().optional(), kind: z.enum(['FIXED', 'PERCENT', 'SCHOLARSHIP']), value: z.coerce.number().positive(), reason: z.string().min(3) }).parse(req.body);
+  // A student can have one plan per course enrollment (course change): the discount targets the chosen plan,
+  // or the newest one when none is given (previous behaviour).
+  const plan = feePlanId
+    ? await prisma.feePlan.findFirst({ where: { id: feePlanId, studentId: d.studentId }, include: { installments: true } })
+    : await prisma.feePlan.findFirst({ where: { studentId: d.studentId }, orderBy: { createdAt: 'desc' }, include: { installments: true } });
+  if (!plan) throw feePlanId ? notFound('Fee plan not found for this student.') : badRequest('Student has no fee plan.');
   const unpaid = plan.installments.reduce((s, i) => s + Number(i.amount) - Number(i.paidAmount), 0);
   const amount = money(d.kind === 'PERCENT' ? (Number(plan.grossAmount) * Math.min(d.value, 100)) / 100 : d.value);
   if (amount > unpaid + 0.001) throw badRequest(`Discount (${amount}) cannot exceed the unpaid amount (${money(unpaid)}).`);
@@ -171,7 +175,7 @@ r.post('/discounts', can('finance:collect', 'finance:manage'), ah(async (req, re
       type: 'DISCOUNT', entityType: 'discount', entityId: disc.id,
       title: `${d.kind === 'SCHOLARSHIP' ? 'Scholarship' : 'Discount'} ${money(amount)} for ${st.fullName}: ${d.reason}`, payload: d, amount, requestedById: req.user!.id,
     });
-    await audit(tx, req, 'CREATE', 'discount', disc.id, null, { ...d, amount, approvalId: appr.id });
+    await audit(tx, req, 'CREATE', 'discount', disc.id, null, { ...d, feePlanId: plan.id, amount, approvalId: appr.id });
     return { discount: disc, approval: appr };
   });
   res.status(201).json(result);

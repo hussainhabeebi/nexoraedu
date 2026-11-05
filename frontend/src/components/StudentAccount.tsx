@@ -88,7 +88,7 @@ export default function StudentAccount({ studentId }: { studentId: string }) {
   const [plan, setPlan] = useState('1');
   const inv = ['/finance', '/students', '/dashboard', '/approvals'];
   const cancelM = useMut((reason: string) => api(`/finance/payments/${cancel.id}/cancel-request`, { body: { reason } }), { success: 'Cancellation sent for approval', invalidate: inv, onSuccess: () => setCancel(null) });
-  const discM = useMut(() => api('/finance/discounts', { body: { studentId, ...disc, value: Number(disc.value) } }), { success: (r: any) => (r.approval.status === 'APPROVED' ? 'Discount applied' : 'Discount sent for approval'), invalidate: inv, onSuccess: () => setModal('') });
+  const discM = useMut(() => api('/finance/discounts', { body: { studentId, feePlanId: p?.id, ...disc, value: Number(disc.value) } }), { success: (r: any) => (r.approval.status === 'APPROVED' ? 'Discount applied' : 'Discount sent for approval'), invalidate: inv, onSuccess: () => setModal('') });
   const refM = useMut(() => api('/finance/refunds', { body: { studentId, amount: Number(ref.amount), reason: ref.reason } }), { success: 'Refund request sent for approval', invalidate: inv, onSuccess: () => setModal('') });
   const payRefM = useMut((reference: string) => api(`/finance/refunds/${payRefund.id}/pay`, { body: { reference } }), { success: 'Refund marked paid', invalidate: inv, onSuccess: () => setPayRefund(null) });
   const planM = useMut(() => api(`/finance/students/${studentId}/fee-plan`, { body: { installments: Number(plan) } }), { success: 'Fee plan created', invalidate: inv, onSuccess: () => setModal('') });
@@ -101,24 +101,34 @@ export default function StudentAccount({ studentId }: { studentId: string }) {
   const waived = p ? Number(p.waived ?? 0) : 0;
   const unpaid = p ? p.installments.filter((i: any) => ['DUE', 'PARTIAL'].includes(i.status)).reduce((s: number, i: any) => s + Number(i.amount) - Number(i.paidAmount), 0) : 0;
   const pendingAdj = p ? data.adjustments?.find((a: any) => a.feePlanId === p.id && a.status === 'PENDING_APPROVAL') : null;
-  const paid = data.payments.filter((x: any) => x.status !== 'CANCELLED').reduce((s: number, x: any) => s + Number(x.amount), 0);
+  // Receipts are per student (payments are allocated across plans, oldest due first); refunds are per student.
+  const receivedAll = data.payments.filter((x: any) => x.status !== 'CANCELLED').reduce((s: number, x: any) => s + Number(x.amount), 0);
+  // Summary cards describe the SELECTED plan only, so the four figures always add up: total − discounts/waived − paid = balance.
+  const paid = p ? p.installments.reduce((s: number, i: any) => s + Number(i.paidAmount), 0) : 0;
+  const multi = data.plans.length > 1;
+  const planLabel = (x: any) => `${x.enrollment?.course?.name ?? 'Plan'}${x.enrollment?.batch ? ' / ' + x.enrollment.batch.code : ''} — ${d(x.createdAt)}${x.enrollment ? ` (${label(x.enrollment.status)})` : ''}`;
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-4">
-        <Stat label="Total fee" value={inr(gross)} />
-        <Stat label={waived ? 'Discounts / waived' : 'Discounts'} value={waived ? `${inr(discount)} / ${inr(waived)}` : inr(discount)} tone="violet" />
-        <Stat label="Paid" value={inr(paid)} tone="green" />
-        <Stat label="Balance" value={inr(data.balance)} tone={data.balance > 0 ? 'rose' : 'green'} />
-      </div>
-      {gross > 0 && <Progress value={((paid + discount + waived) / gross) * 100} tone="green" />}
-      {data.plans.length > 1 && (
-        <Select label="Fee plan" value={p.id} onChange={(e) => setPlanId(e.target.value)} options={data.plans.map((x: any) => ({ value: x.id, label: `${x.enrollment?.course?.name ?? 'Plan'}${x.enrollment?.batch ? ' / ' + x.enrollment.batch.code : ''} — ${d(x.createdAt)}${x.enrollment ? ` (${label(x.enrollment.status)})` : ''}` }))} />
+      {multi && (
+        <Select label="Fee plan" value={p.id} onChange={(e) => setPlanId(e.target.value)} options={data.plans.map((x: any) => ({ value: x.id, label: planLabel(x) }))} hint="The figures and installments below are for this plan." />
       )}
+      <div className="grid gap-4 sm:grid-cols-4">
+        <Stat label={multi ? 'Plan fee' : 'Total fee'} value={inr(gross)} />
+        <Stat label={waived ? 'Discounts / waived' : 'Discounts'} value={waived ? `${inr(discount)} / ${inr(waived)}` : inr(discount)} tone="violet" />
+        <Stat label={multi ? 'Paid on this plan' : 'Paid'} value={inr(paid)} tone="green" />
+        <Stat label={multi ? 'Plan balance' : 'Balance'} value={inr(unpaid)} tone={unpaid > 0 ? 'rose' : 'green'} />
+      </div>
+      {(multi || Math.abs(Number(data.balance) - unpaid) > 0.005) && (
+        <p className="rounded-lg bg-slate-50 px-4 py-2 text-sm text-slate-600" data-testid="account-balance">
+          Account balance (all plans{Math.abs(Number(data.balance) - unpaid) > 0.005 && !multi ? ', incl. refunds paid' : ''}): <span className="font-semibold text-slate-900">{inr(data.balance)}</span> · Received in total: {inr(receivedAll)}. Payments are allocated to the oldest due installments across all plans.
+        </p>
+      )}
+      {gross > 0 && <Progress value={((paid + discount + waived) / gross) * 100} tone="green" />}
       <div className="flex flex-wrap gap-2">
         {can('finance:collect') && data.balance > 0 && <button className="btn-primary" onClick={() => setModal('pay')}><Plus className="h-4 w-4" /> Record payment</button>}
         {can('finance:collect', 'finance:manage') && p && <button className="btn-secondary" onClick={() => setModal('discount')}><Percent className="h-4 w-4" /> Discount / scholarship</button>}
-        {can('finance:collect', 'finance:manage') && paid > 0 && <button className="btn-secondary" onClick={() => setModal('refund')}><Undo2 className="h-4 w-4" /> Request refund</button>}
+        {can('finance:collect', 'finance:manage') && receivedAll > 0 && <button className="btn-secondary" onClick={() => setModal('refund')}><Undo2 className="h-4 w-4" /> Request refund</button>}
         {can('finance:collect', 'finance:manage') && p && unpaid > 0 && <button className="btn-secondary" disabled={!!pendingAdj} title={pendingAdj ? 'An adjustment for this plan is awaiting approval' : undefined} onClick={() => setModal('adjust')}><CalendarClock className="h-4 w-4" /> Fee adjustment</button>}
         {can('finance:manage') && !p && <button className="btn-primary" onClick={() => setModal('plan')}>Create fee plan</button>}
       </div>
@@ -183,13 +193,14 @@ export default function StudentAccount({ studentId }: { studentId: string }) {
         <div className="grid gap-4 sm:grid-cols-2">
           <Select label="Type" value={disc.kind} onChange={(e) => setDisc({ ...disc, kind: e.target.value })} options={[{ value: 'FIXED', label: 'Fixed amount' }, { value: 'PERCENT', label: 'Percentage' }, { value: 'SCHOLARSHIP', label: 'Scholarship' }]} />
           <Input label={disc.kind === 'PERCENT' ? 'Percent (%)' : 'Amount (₹)'} type="number" min={0} value={disc.value} onChange={(e) => setDisc({ ...disc, value: e.target.value })} />
+          {p && <p className="sm:col-span-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600" data-testid="discount-plan">Applies to: <span className="font-medium text-slate-900">{multi ? planLabel(p) : 'this fee plan'}</span> · unpaid {inr(unpaid)}{disc.kind === 'PERCENT' && ` · percentage of the plan fee ${inr(gross)}`}</p>}
           <Select className="sm:col-span-2" label="Reason" required value={disc.reason} onChange={(e) => setDisc({ ...disc, reason: e.target.value })} placeholder="Select" options={(reasons.data?.items ?? []).map((r) => ({ value: r.label, label: r.label }))} />
         </div>
         <p className="mt-3 text-xs text-slate-500">Discounts above the configured limit and all scholarships go through the approval workflow.</p>
       </Modal>
       <Modal open={modal === 'refund'} onClose={() => setModal('')} title="Request refund" footer={<button className="btn-primary" disabled={!ref.amount || ref.reason.length < 5 || refM.isPending} onClick={() => refM.mutate(undefined)}>Submit for approval</button>}>
         <div className="space-y-4">
-          <Input label="Amount (₹)" type="number" min={1} value={ref.amount} onChange={(e) => setRef({ ...ref, amount: e.target.value })} hint={`Paid so far: ${inr(paid)}`} />
+          <Input label="Amount (₹)" type="number" min={1} value={ref.amount} onChange={(e) => setRef({ ...ref, amount: e.target.value })} hint={`Received from this student (all plans): ${inr(receivedAll)}`} />
           <Textarea label="Reason (as per refund policy)" required value={ref.reason} onChange={(e) => setRef({ ...ref, reason: e.target.value })} />
         </div>
       </Modal>
