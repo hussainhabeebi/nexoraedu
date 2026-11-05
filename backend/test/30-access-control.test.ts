@@ -166,6 +166,23 @@ describe('R5 object-level scoping', () => {
     expect(ok.status).toBe(201);
   });
 
+  it('SEC-T16b content check: declared types resolve only to real signatures; files outside the upload folder are refused', async () => {
+    const { fileMatchesType } = await import('../src/lib/upload');
+    const dir = path.resolve(config.uploadDir);
+    const f = path.join(dir, `sniff-${Date.now()}.pdf`);
+    fs.writeFileSync(f, '%PDF-1.7 synthetic');
+    try {
+      expect(fileMatchesType(f, 'application/pdf')).toBe(true);
+      // Built-in object property names must never act as a signature check (CodeQL unvalidated dynamic call).
+      for (const t of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) expect(fileMatchesType(f, t), t).toBe(false);
+      // A path outside the upload directory is refused before any file is opened (CodeQL path injection).
+      expect(() => fileMatchesType(path.join(dir, '..', 'package.json'), 'application/pdf')).toThrow(/Invalid upload path/);
+      expect(() => fileMatchesType('/etc/hostname', 'application/pdf')).toThrow(/Invalid upload path/);
+    } finally {
+      fs.rmSync(f, { force: true });
+    }
+  });
+
   it('SEC-T17 photos need sign-in and scope; answer keys hidden from non-exam-managers', async () => {
     expect((await request(app).get(`/api/v1/files/${photoName}`)).status).toBe(401);
     expect((await request(app).get(`/api/v1/files/${photoName}`).set(as(c2))).status).toBe(404);
