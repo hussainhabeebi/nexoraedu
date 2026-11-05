@@ -8,6 +8,8 @@ import { can, userCan } from '../lib/auth';
 import { audit } from '../lib/audit';
 import { getSettings } from '../lib/settings';
 import { money, toCsv } from '../lib/util';
+import { dayDiff, formatDate, toCalendarDate } from '../lib/caldate';
+import { reconcile } from '../services/reconciliation';
 import { createApproval } from '../services/approvals';
 import { createFeePlan, ledger, recordPayment, studentBalance } from '../services/finance';
 import { notifyLater } from '../services/notify';
@@ -32,7 +34,8 @@ r.get('/students/:id/account', can('finance:read'), ah(async (req, res) => {
 }));
 
 r.post('/students/:id/fee-plan', can('finance:manage'), ah(async (req, res) => {
-  const { installments, startDate } = z.object({ installments: z.number().int().min(1).max(24), startDate: z.coerce.date().optional() }).parse(req.body);
+  // startDate: a calendar date "YYYY-MM-DD" in the academy time zone (preferred) or an ISO timestamp.
+  const { installments, startDate } = z.object({ installments: z.number().int().min(1).max(24), startDate: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.coerce.date()]).optional() }).parse(req.body);
   const st = await prisma.student.findUniqueOrThrow({ where: { id: req.params.id } });
   const existing = await prisma.feePlan.count({ where: { studentId: st.id, courseId: st.courseId } });
   if (existing) throw badRequest('A fee plan already exists for this course. Use discounts or adjustments instead.');
@@ -108,7 +111,7 @@ export async function receiptPdf(paymentId: string, out: NodeJS.WritableStream) 
   doc.moveDown(0.5).fontSize(9);
   const row = (k: string, v: string) => doc.font('Helvetica-Bold').text(k, { continued: true, width: 120 }).font('Helvetica').text(`  ${v}`);
   row('Receipt No:', p.receiptNumber);
-  row('Date:', p.paidAt.toLocaleDateString('en-IN'));
+  row('Date:', formatDate(p.paidAt, (await getSettings()).academy.timeZone));
   row('Student:', `${p.student.fullName} (${p.student.studentCode})`);
   row('Course / Batch:', `${p.student.course.name}${p.student.batch ? ' / ' + p.student.batch.code : ''}`);
   row('Payment mode:', p.mode + (p.reference ? ` — Ref ${p.reference}` : ''));
@@ -203,7 +206,8 @@ r.get('/refunds', can('finance:read'), ah(async (req, res) => {
 
 // FIN-07/15 outstanding with ageing buckets
 r.get('/outstanding', can('finance:read'), ah(async (req, res) => {
-  const now = Date.now();
+  const tz = (await getSettings()).academy.timeZone;
+  const todayCal = toCalendarDate(new Date(), tz);
   const insts = await prisma.installment.findMany({
     where: { status: { not: 'PAID' }, feePlan: { student: { status: { notIn: ['WITHDRAWN', 'TERMINATED'] }, ...(req.query.courseId && { courseId: String(req.query.courseId) }), ...(req.query.batchId && { batchId: String(req.query.batchId) }) } } },
     include: { feePlan: { include: { student: { select: { id: true, fullName: true, studentCode: true, phone: true, batch: { select: { code: true } }, course: { select: { name: true } } } } } } },
@@ -214,13 +218,14 @@ r.get('/outstanding', can('finance:read'), ah(async (req, res) => {
   for (const i of insts) {
     const open = money(Number(i.amount) - Number(i.paidAmount));
     if (open <= 0) continue;
-    const days = Math.floor((now - i.dueDate.getTime()) / 864e5);
-    const b = days < 0 ? 'notDue' : days <= 30 ? 'd0_30' : days <= 60 ? 'd31_60' : days <= 90 ? 'd61_90' : 'd90p';
+    // FIN-07 ageing in whole calendar days in the academy zone: due today = not yet overdue; due yesterday = 1 day.
+    const days = dayDiff(toCalendarDate(i.dueDate, tz), todayCal);
+    const b = days <= 0 ? 'notDue' : days <= 30 ? 'd0_30' : days <= 60 ? 'd31_60' : days <= 90 ? 'd61_90' : 'd90p';
     buckets[b] = money(buckets[b] + open);
     const st = i.feePlan.student;
     const row = byStudent.get(st.id) ?? { studentId: st.id, studentCode: st.studentCode, name: st.fullName, phone: st.phone, course: st.course.name, batch: st.batch?.code, due: 0, overdue: 0, oldestDue: i.dueDate, maxDaysOverdue: 0 };
     row.due = money(row.due + open);
-    if (days >= 0) row.overdue = money(row.overdue + open);
+    if (days > 0) row.overdue = money(row.overdue + open);
     row.maxDaysOverdue = Math.max(row.maxDaysOverdue, days);
     byStudent.set(st.id, row);
   }
@@ -265,6 +270,14 @@ r.get('/collections', can('finance:read'), ah(async (req, res) => {
 r.post('/reminders/run', can('finance:collect'), ah(async (_req, res) => {
   const { runFeeReminders } = await import('../jobs/scheduler');
   res.json({ sent: await runFeeReminders(true) });
+}));
+
+// FIN-13 / RPT-06 reconciliation: read-only consistency check (never modifies records).
+r.get('/reconciliation', can('finance:manage', 'audit:read'), ah(async (req, res) => {
+  const studentId = req.query.studentId ? String(req.query.studentId) : undefined;
+  const out = await reconcile({ studentId });
+  await audit(prisma, req, 'REPORT_RUN', 'report', 'reconciliation', null, { studentId, ok: out.ok, bySeverity: out.bySeverity });
+  res.json(out);
 }));
 
 export default r;

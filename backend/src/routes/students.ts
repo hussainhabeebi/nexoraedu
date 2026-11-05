@@ -76,7 +76,7 @@ r.post('/', can('students:manage'), ah(async (req, res) => {
   const studentId = await prisma.$transaction(async (tx) => {
     await assertNoDuplicateStudent(tx, data.personal.phone, data.personal.email);
     await assertBatchAvailable(tx, data.preferences.batchId!, data.preferences.courseId);
-    const code = await nextNumber(`application:${new Date().getFullYear()}`, s.ids.application, tx);
+    const code = await nextNumber('application:{year}', s.ids.application, tx);
     const app = await tx.application.create({ data: { code, courseId: data.preferences.courseId, batchId: data.preferences.batchId, data: data as any, status: 'APPROVED', source: 'direct' } });
     const id = await admitApplication(tx, app.id, { batchId: data.preferences.batchId, installments: body.installments }, req.user!.id);
     await audit(tx, req, 'CREATE', 'student', id, null, data.personal);

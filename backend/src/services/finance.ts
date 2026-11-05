@@ -5,6 +5,7 @@ import { badRequest, conflict, notFound } from '../lib/http';
 import { nextNumber } from '../lib/sequence';
 import { getSettings } from '../lib/settings';
 import { money } from '../lib/util';
+import { addMonthsClamped, endOfDayUtc, parseIsoDate, toCalendarDate, type CalendarDate } from '../lib/caldate';
 
 type Tx = Prisma.TransactionClient;
 
@@ -17,28 +18,56 @@ export async function studentBalance(studentId: string, tx: Tx = prisma) {
   return money(Number(agg._sum.debit ?? 0) - Number(agg._sum.credit ?? 0));
 }
 
+/** Integer paise arithmetic for splitting amounts (no floating-point drift). */
+const toPaise = (n: number) => Math.round(n * 100);
+const fromPaise = (p: number) => p / 100;
+
+/**
+ * FIN-03 installment schedule (pure, unit-tested):
+ *  - the first installment is due on the start date (a calendar date in the academy zone);
+ *  - installment n is due n months later on the same day-of-month, clamped to the month's last day
+ *    ("anchor day, clamped": 31 Jan → 28/29 Feb → 31 Mar …, never rolling into the next month);
+ *  - each due date is the END of that calendar day in the academy zone, stored in UTC;
+ *  - amounts are split in whole paise; the last installment absorbs the remainder.
+ */
+export function buildInstallmentSchedule(grossAmount: number, count: number, start: CalendarDate, timeZone: string) {
+  const n = Math.max(1, Math.floor(count));
+  const total = toPaise(grossAmount);
+  const base = Math.floor(total / n);
+  return Array.from({ length: n }, (_, i) => {
+    const date = addMonthsClamped(start, i, start.d);
+    return { seq: i + 1, amount: fromPaise(i === n - 1 ? total - base * (n - 1) : base), calendarDate: date, dueDate: endOfDayUtc(date, timeZone) };
+  });
+}
+
+/** Start date for a plan: an ISO calendar date ("YYYY-MM-DD") is taken as-is; an instant is converted to the academy zone. */
+export function planStartDate(input: Date | string | undefined, timeZone: string): CalendarDate {
+  if (typeof input === 'string') {
+    const c = parseIsoDate(input);
+    if (!c) throw badRequest('Start date must be a valid date (YYYY-MM-DD).');
+    return c;
+  }
+  return toCalendarDate(input ?? new Date(), timeZone);
+}
+
 /** FIN-02/03: build a fee plan from the course fee structure, split into installments, invoice each. */
-export async function createFeePlan(tx: Tx, p: { studentId: string; courseId: string; installments?: number; startDate?: Date; userId?: string }) {
+export async function createFeePlan(tx: Tx, p: { studentId: string; courseId: string; installments?: number; startDate?: Date | string; userId?: string }) {
   const comps = await tx.feeComponent.findMany({ where: { courseId: p.courseId, isActive: true, effectiveFrom: { lte: new Date() } } });
   const components = comps.map((c) => {
     const tax = money((Number(c.amount) * Number(c.taxPercent)) / 100);
     return { name: c.name, amount: Number(c.amount), tax, total: money(Number(c.amount) + tax) };
   });
-  const gross = money(components.reduce((s, c) => s + c.total, 0));
+  const gross = fromPaise(components.reduce((s, c) => s + toPaise(c.total), 0));
   const course = await tx.course.findUniqueOrThrow({ where: { id: p.courseId } });
-  const n = Math.max(1, p.installments ?? course.defaultInstallments);
-  const start = p.startDate ?? new Date();
-  const base = Math.floor((gross / n) * 100) / 100;
-  const plan = await tx.feePlan.create({ data: { studentId: p.studentId, courseId: p.courseId, grossAmount: gross, components } });
   const s = await getSettings();
-  for (let i = 0; i < n; i++) {
-    const amount = i === n - 1 ? money(gross - base * (n - 1)) : base;
-    const due = new Date(start);
-    due.setMonth(due.getMonth() + i);
-    due.setHours(23, 59, 59, 0);
-    const inst = await tx.installment.create({ data: { feePlanId: plan.id, seq: i + 1, amount, dueDate: due } });
-    const number = await nextNumber(`invoice:${new Date().getFullYear()}`, s.ids.invoice, tx);
-    await tx.invoice.create({ data: { number, studentId: p.studentId, feePlanId: plan.id, installmentId: inst.id, amount, dueDate: due } });
+  const tz = s.academy.timeZone;
+  const start = planStartDate(p.startDate, tz);
+  const schedule = buildInstallmentSchedule(gross, p.installments ?? course.defaultInstallments, start, tz);
+  const plan = await tx.feePlan.create({ data: { studentId: p.studentId, courseId: p.courseId, grossAmount: gross, components, dueAnchorDay: start.d, dueTimeZone: tz } });
+  for (const it of schedule) {
+    const inst = await tx.installment.create({ data: { feePlanId: plan.id, seq: it.seq, amount: it.amount, dueDate: it.dueDate } });
+    const number = await nextNumber('invoice:{year}', s.ids.invoice, tx);
+    await tx.invoice.create({ data: { number, studentId: p.studentId, feePlanId: plan.id, installmentId: inst.id, amount: it.amount, dueDate: it.dueDate } });
   }
   if (gross > 0) await ledger(tx, { studentId: p.studentId, type: 'FEE', debit: gross, refType: 'fee_plan', refId: plan.id, narration: `Course fee — ${course.name}`, userId: p.userId });
   return plan;
@@ -69,7 +98,7 @@ export async function recordPayment(
   const due = money(insts.reduce((s, i) => s + Number(i.amount) - Number(i.paidAmount), 0));
   if (amount > due + 0.001) throw conflict(`Amount exceeds the outstanding balance of ${due.toFixed(2)}.`);
   const s = await getSettings();
-  const receiptNumber = await nextNumber(`receipt:${new Date().getFullYear()}`, s.ids.receipt, tx);
+  const receiptNumber = await nextNumber('receipt:{year}', s.ids.receipt, tx);
   const payment = await tx.payment.create({
     data: { receiptNumber, studentId: p.studentId, amount, mode: p.mode, reference: p.reference, payer: p.payer, paidAt: p.paidAt ?? new Date(), idempotencyKey: p.idempotencyKey, gatewayRef: p.gatewayRef, recordedById: p.userId },
   });

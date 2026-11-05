@@ -11,6 +11,7 @@ import { DEFAULT_SETTINGS, getSettings, invalidateSettings } from '../lib/settin
 import { MIN_LENGTH_FLOOR, UNUSABLE_PASSWORD } from '../lib/password';
 import { issueActivationLink, issueResetLink } from '../lib/activation';
 import { normalizeEmail } from '../lib/util';
+import { isValidTimeZone } from '../lib/caldate';
 import { notifyLater } from '../services/notify';
 import { APPROVAL_TYPES, assertWorkflowLevels, createApproval, MANDATORY_APPROVAL_TYPES } from '../services/approvals';
 
@@ -332,6 +333,8 @@ r.put('/settings/:key', can('settings:manage'), ah(async (req, res) => {
   if (!(key in DEFAULT_SETTINGS)) throw badRequest('Unknown settings group.');
   const before = (await getSettings())[key];
   const value: any = { ...before, ...z.record(z.string(), z.any()).parse(req.body) };
+  if (key === 'academy' && value.timeZone !== undefined && !isValidTimeZone(String(value.timeZone))) throw badRequest('Unknown time zone. Use an IANA name such as Asia/Kolkata.');
+  // Changing the zone affects NEW fee plans only; existing plans keep their stored due dates and recorded zone.
   if (key === 'security') {
     // Security floors from the SRS cannot be weakened from the UI (SEC-01, SEC-04, SEC-05).
     const sec = z.object({ sessionTimeoutMin: z.number().int().min(5).max(240), passwordMinLength: z.number().int().min(MIN_LENGTH_FLOOR).max(64), maxFailedLogins: z.number().int().min(3).max(10), lockMinutes: z.number().int().min(5).max(1440), activationHours: z.number().int().min(1).max(168) }).parse(value);

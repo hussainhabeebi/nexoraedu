@@ -16,7 +16,9 @@
     "admin:bootstrap:dev": "tsx src/cli/bootstrap-admin.ts",
     "accounts:legacy": "node dist/cli/legacy-accounts.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "finance:reconcile": "node dist/cli/reconcile.js",
+    "finance:reconcile:dev": "tsx src/cli/reconcile.ts"
   },
   "prisma": {
     "seed": "tsx src/seed/reference.ts"

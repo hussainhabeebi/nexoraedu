@@ -141,7 +141,7 @@ r.post('/exams', can('exams:manage'), ah(async (req, res) => {
   const d = examSchema.parse(req.body);
   if (d.endAt <= d.startAt) throw badRequest('Exam window end must be after start.');
   if (d.passMarks > d.totalMarks) throw badRequest('Pass marks cannot exceed total marks.');
-  const code = await nextNumber(`exam:${new Date().getFullYear()}`, 'EX-{YYYY}-####');
+  const code = await nextNumber('exam:{year}', 'EX-{YYYY}-####');
   const e = await prisma.$transaction(async (tx) => {
     const e = await tx.exam.create({ data: { ...d, code } });
     await audit(tx, req, 'CREATE', 'exam', e.id, null, d);
@@ -349,7 +349,7 @@ r.post('/certificates', can('exams:manage'), ah(async (req, res) => {
   if (existing) throw conflict(`Certificate ${existing.number} already ${existing.status === 'ISSUED' ? 'issued' : 'pending approval'}.`);
   const s = await getSettings();
   const out = await prisma.$transaction(async (tx) => {
-    const number = await nextNumber(`certificate:${new Date().getFullYear()}`, s.ids.certificate, tx);
+    const number = await nextNumber('certificate:{year}', s.ids.certificate, tx);
     const c = await tx.certificate.create({ data: { number, studentId, courseId: st.courseId, verificationCode: randomToken(9).toUpperCase().replace(/[^A-Z0-9]/g, 'X').slice(0, 10) } });
     const a = await createApproval(tx, { type: 'CERTIFICATE', entityType: 'certificate', entityId: c.id, title: `Certificate ${number} — ${st.fullName} (${st.course.name})`, requestedById: req.user!.id });
     return { certificate: c, approval: a };

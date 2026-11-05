@@ -376,7 +376,7 @@ r.post('/leads/:id/application', can('leads:update'), ah(async (req, res) => {
   if (data.preferences.batchId) await assertBatchAvailable(prisma, data.preferences.batchId, data.preferences.courseId);
   const s = await getSettings();
   const app = await prisma.$transaction(async (tx) => {
-    const code = await nextNumber(`application:${new Date().getFullYear()}`, s.ids.application, tx);
+    const code = await nextNumber('application:{year}', s.ids.application, tx);
     const app = await tx.application.create({ data: { code, leadId: lead.id, courseId: data.preferences.courseId, batchId: data.preferences.batchId || null, data: data as any, status: 'UNDER_REVIEW' } });
     await tx.lead.update({ where: { id: lead.id }, data: { status: 'APPLICATION', courseId: data.preferences.courseId, lastActivityAt: new Date() } });
     await tx.leadActivity.create({ data: { leadId: lead.id, type: 'STATUS', content: `${lead.status} → APPLICATION (${code})`, userId: req.user!.id } });

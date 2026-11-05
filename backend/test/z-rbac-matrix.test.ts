@@ -102,6 +102,7 @@ const MATRIX: Record<string, Exp> = {
   'GET /finance/payments/:id/receipt.pdf': FIN_R, 'POST /finance/payments/:id/cancel-request': FIN_C, 'POST /finance/discounts': FIN_C,
   'POST /finance/refunds': FIN_C, 'POST /finance/refunds/:id/pay': FIN_M, 'GET /finance/refunds': FIN_R, 'GET /finance/outstanding': FIN_R,
   'GET /finance/collections': FIN_R, 'POST /finance/reminders/run': FIN_C,
+  'GET /finance/reconciliation': ['sa', 'mgmt', 'finmgr'], // FIN-13: Finance Manager; Management via audit:read
   // ── Examinations (Mgmt R, Admin R, AcadMgr R, Faculty R, ExamOfficer CRUDA) — deferred in MVP, still protected ──
   'GET /exams/questions': EXM_R, 'POST /exams/questions': EXM_M, 'PATCH /exams/questions/:id': EXM_M, 'POST /exams/questions/import': EXM_M,
   'GET /exams/exams': EXM_R, 'GET /exams/exams/:id': EXM_R, 'POST /exams/exams': EXM_M, 'PATCH /exams/exams/:id': EXM_M,

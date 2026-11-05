@@ -87,7 +87,7 @@ export async function admitApplication(tx: Tx, applicationId: string, opts: { ba
   if (batchId) await assertBatchAvailable(tx, batchId, app.courseId);
 
   const s = await getSettings();
-  const studentCode = await nextNumber(`student:${new Date().getFullYear()}`, s.ids.student, tx);
+  const studentCode = await nextNumber('student:{year}', s.ids.student, tx);
   const studentRole = await tx.role.findUniqueOrThrow({ where: { key: 'student' } });
   const emailN = normalizeEmail(p.email)!;
   const existingUser = await tx.user.findUnique({ where: { email: emailN } });
