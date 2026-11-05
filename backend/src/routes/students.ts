@@ -17,6 +17,7 @@ import { applicationDataSchema, admitApplication, assertBatchAvailable, assertNo
 import { createApproval } from '../services/approvals';
 import { studentBalance } from '../services/finance';
 import { studentAttendancePct } from './academics';
+import { cancelEnrollment, syncEnrollmentWithStudentStatus } from '../services/enrollments';
 
 const r = Router();
 
@@ -150,16 +151,65 @@ r.patch('/:id', can('students:manage'), ah(async (req, res) => {
 r.post('/:id/status', can('students:manage', 'academics:manage'), ah(async (req, res) => {
   const { status, reason } = z.object({ status: z.enum(['APPLIED', 'ADMITTED', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'WITHDRAWN', 'TERMINATED']), reason: z.string().min(3) }).parse(req.body);
   const s = await prisma.student.findUniqueOrThrow({ where: { id: req.params.id } });
+  let note: string | null = null;
   await prisma.$transaction(async (tx) => {
+    // Enrollment history stays in step with the student status (E5); a re-activation opens a new enrollment.
+    note = await syncEnrollmentWithStudentStatus(tx, s.id, s.status, status, reason, req.user!.id);
     await tx.student.update({ where: { id: s.id }, data: { status } });
-    await tx.studentHistory.create({ data: { studentId: s.id, type: 'STATUS', message: `${s.status} → ${status}: ${reason}`, userId: req.user!.id } });
+    await tx.studentHistory.create({ data: { studentId: s.id, type: 'STATUS', message: `${s.status} → ${status}: ${reason}${note ? ` ${note}` : ''}`, userId: req.user!.id } });
     if (['WITHDRAWN', 'TERMINATED'].includes(status) && s.userId) {
       await tx.user.update({ where: { id: s.userId }, data: { isActive: false, authVersion: { increment: 1 } } });
       await tx.session.updateMany({ where: { userId: s.userId, revokedAt: null }, data: { revokedAt: new Date(), revokedReason: 'STUDENT_' + status } });
     }
     await audit(tx, req, 'STATUS', 'student', s.id, { status: s.status }, { status, reason });
   });
-  res.json({ ok: true });
+  res.json({ ok: true, note });
+}));
+
+// ── Enrollment history (20.4, STU-10) ──
+r.get('/:id/enrollments', can(...READ), ah(async (req, res) => {
+  const st = await prisma.student.findFirst({ where: { AND: [{ id: req.params.id }, await scope(req)] }, select: { id: true } });
+  if (!st) throw notFound('Student not found');
+  const showFees = userCan(req, 'finance:read') || userCan(req, 'students:manage');
+  const items = await prisma.enrollment.findMany({
+    where: { studentId: st.id },
+    orderBy: [{ startDate: 'desc' }, { createdAt: 'desc' }],
+    include: {
+      course: { select: { id: true, code: true, name: true } },
+      batch: { select: { id: true, code: true, name: true, status: true } },
+      application: { select: { id: true, code: true } },
+      _count: { select: { attendance: true } },
+      ...(showFees && { feePlans: { select: { id: true, grossAmount: true, discount: true, installments: { select: { amount: true, paidAmount: true } } } } }),
+    },
+  });
+  res.json({
+    items: items.map(({ feePlans, ...e }: any) => ({
+      ...e,
+      current: e.status === 'ACTIVE' || e.status === 'ON_HOLD',
+      ...(showFees && { fees: (feePlans ?? []).map((f: any) => ({ id: f.id, gross: Number(f.grossAmount), discount: Number(f.discount), outstanding: Math.round(f.installments.reduce((t: number, i: any) => t + Number(i.amount) - Number(i.paidAmount), 0) * 100) / 100 })) }),
+    })),
+  });
+}));
+
+// E6: cancel an enrollment recorded in error / abandoned before any study or payment (Admin, reason required).
+r.post('/:id/enrollments/:eid/cancel', can('students:manage'), ah(async (req, res) => {
+  const { reason } = z.object({ reason: z.string().min(5).max(500) }).parse(req.body);
+  const s = await prisma.student.findUniqueOrThrow({ where: { id: req.params.id } });
+  const out = await prisma.$transaction(async (tx) => {
+    const out = await cancelEnrollment(tx, { studentId: s.id, enrollmentId: req.params.eid, reason, actorId: req.user!.id });
+    // No remaining current enrollment → the student is withdrawn (STU-13 has no "cancelled" student status).
+    if (['ADMITTED', 'ACTIVE', 'ON_HOLD', 'APPLIED'].includes(s.status)) {
+      await tx.student.update({ where: { id: s.id }, data: { status: 'WITHDRAWN' } });
+      if (s.userId) {
+        await tx.user.update({ where: { id: s.userId }, data: { isActive: false, authVersion: { increment: 1 } } });
+        await tx.session.updateMany({ where: { userId: s.userId, revokedAt: null }, data: { revokedAt: new Date(), revokedReason: 'ENROLLMENT_CANCELLED' } });
+      }
+    }
+    await tx.studentHistory.create({ data: { studentId: s.id, type: 'STATUS', message: `Enrollment cancelled: ${reason}${out.openFeePlanInstallments ? ` — ${out.openFeePlanInstallments} unpaid installment(s) remain; a fee adjustment needs Finance approval (22.6).` : ''}`, userId: req.user!.id } });
+    await audit(tx, req, 'CANCEL_ENROLLMENT', 'student', s.id, { status: s.status }, { enrollmentId: req.params.eid, reason });
+    return out;
+  });
+  res.json({ ok: true, enrollment: out.enrollment, unpaidInstallments: out.openFeePlanInstallments });
 }));
 
 // STU-10 batch transfer / course change via approval
@@ -167,6 +217,9 @@ r.post('/:id/transfer', can('students:manage', 'academics:manage'), ah(async (re
   const { toBatchId, reason } = z.object({ toBatchId: z.string(), reason: z.string().min(3) }).parse(req.body);
   const s = await prisma.student.findUniqueOrThrow({ where: { id: req.params.id } });
   const to = await prisma.batch.findUniqueOrThrow({ where: { id: toBatchId } });
+  const cur = await prisma.enrollment.findFirst({ where: { studentId: s.id, status: { in: ['ACTIVE', 'ON_HOLD'] } } });
+  if (!cur) throw badRequest('The student has no current enrollment. Re-activate the student before a transfer.');
+  if (cur.batchId === toBatchId) throw badRequest('The student is already enrolled in this batch.');
   await assertBatchAvailable(prisma, toBatchId, to.courseId);
   const a = await prisma.$transaction(async (tx) => {
     const a = await createApproval(tx, { type: 'BATCH_TRANSFER', entityType: 'student', entityId: s.id, title: `Batch transfer: ${s.fullName} → ${to.code}`, payload: { toBatchId, reason }, requestedById: req.user!.id });

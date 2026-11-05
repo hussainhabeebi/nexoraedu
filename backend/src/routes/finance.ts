@@ -37,8 +37,11 @@ r.post('/students/:id/fee-plan', can('finance:manage'), ah(async (req, res) => {
   // startDate: a calendar date "YYYY-MM-DD" in the academy time zone (preferred) or an ISO timestamp.
   const { installments, startDate } = z.object({ installments: z.number().int().min(1).max(24), startDate: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.coerce.date()]).optional() }).parse(req.body);
   const st = await prisma.student.findUniqueOrThrow({ where: { id: req.params.id } });
-  const existing = await prisma.feePlan.count({ where: { studentId: st.id, courseId: st.courseId } });
-  if (existing) throw badRequest('A fee plan already exists for this course. Use discounts or adjustments instead.');
+  const enrollment = await prisma.enrollment.findFirst({ where: { studentId: st.id, courseId: st.courseId, status: { in: ['ACTIVE', 'ON_HOLD'] } } });
+  if (!enrollment) throw badRequest('The student has no current enrollment in this course.');
+  // One plan per enrollment (a course change opens a new enrollment, which may then get its own plan).
+  const existing = await prisma.feePlan.count({ where: { studentId: st.id, OR: [{ enrollmentId: enrollment.id }, { enrollmentId: null, courseId: st.courseId }] } });
+  if (existing) throw badRequest('A fee plan already exists for this enrollment. Use discounts or adjustments instead.');
   const plan = await prisma.$transaction(async (tx) => {
     const plan = await createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments, startDate, userId: req.user!.id });
     await audit(tx, req, 'CREATE', 'fee_plan', plan.id, null, { studentId: st.id, installments, startDate });

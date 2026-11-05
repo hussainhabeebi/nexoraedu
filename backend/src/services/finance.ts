@@ -51,7 +51,7 @@ export function planStartDate(input: Date | string | undefined, timeZone: string
 }
 
 /** FIN-02/03: build a fee plan from the course fee structure, split into installments, invoice each. */
-export async function createFeePlan(tx: Tx, p: { studentId: string; courseId: string; installments?: number; startDate?: Date | string; userId?: string }) {
+export async function createFeePlan(tx: Tx, p: { studentId: string; courseId: string; installments?: number; startDate?: Date | string; userId?: string; enrollmentId?: string | null }) {
   const comps = await tx.feeComponent.findMany({ where: { courseId: p.courseId, isActive: true, effectiveFrom: { lte: new Date() } } });
   const components = comps.map((c) => {
     const tax = money((Number(c.amount) * Number(c.taxPercent)) / 100);
@@ -63,7 +63,9 @@ export async function createFeePlan(tx: Tx, p: { studentId: string; courseId: st
   const tz = s.academy.timeZone;
   const start = planStartDate(p.startDate, tz);
   const schedule = buildInstallmentSchedule(gross, p.installments ?? course.defaultInstallments, start, tz);
-  const plan = await tx.feePlan.create({ data: { studentId: p.studentId, courseId: p.courseId, grossAmount: gross, components, dueAnchorDay: start.d, dueTimeZone: tz } });
+  // Link to the enrollment being billed: given explicitly, else the student's current enrollment in this course.
+  const enrollmentId = p.enrollmentId ?? (await tx.enrollment.findFirst({ where: { studentId: p.studentId, courseId: p.courseId, status: { in: ['ACTIVE', 'ON_HOLD'] } }, select: { id: true } }))?.id ?? null;
+  const plan = await tx.feePlan.create({ data: { studentId: p.studentId, courseId: p.courseId, grossAmount: gross, components, dueAnchorDay: start.d, dueTimeZone: tz, enrollmentId } });
   for (const it of schedule) {
     const inst = await tx.installment.create({ data: { feePlanId: plan.id, seq: it.seq, amount: it.amount, dueDate: it.dueDate } });
     const number = await nextNumber('invoice:{year}', s.ids.invoice, tx);

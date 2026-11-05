@@ -333,10 +333,12 @@ r.post('/sessions/:id/attendance', can('attendance:mark'), ah(async (req, res) =
   }
   await prisma.$transaction(async (tx) => {
     const before = await tx.attendance.findMany({ where: { sessionId: s.id, studentId: { in: records.map((x) => x.studentId) } }, select: { studentId: true, status: true } });
+    const enr = await tx.enrollment.findMany({ where: { studentId: { in: records.map((x) => x.studentId) }, batchId: s.batchId, status: { in: ['ACTIVE', 'ON_HOLD'] } }, select: { id: true, studentId: true } });
+    const enrollmentOf = Object.fromEntries(enr.map((e) => [e.studentId, e.id]));
     for (const rec of records) {
       await tx.attendance.upsert({
         where: { sessionId_studentId: { sessionId: s.id, studentId: rec.studentId } },
-        create: { sessionId: s.id, studentId: rec.studentId, status: rec.status, markedById: req.user!.id },
+        create: { sessionId: s.id, studentId: rec.studentId, enrollmentId: enrollmentOf[rec.studentId] ?? null, status: rec.status, markedById: req.user!.id },
         update: { status: rec.status, markedById: req.user!.id, markedAt: new Date() },
       });
     }

@@ -1,6 +1,7 @@
 /** Wire approval types to the domain actions they unlock (SRS §22). */
 import { registerApprovalHandler } from './approvals';
-import { admitApplication, assertBatchAvailable } from './admissions';
+import { admitApplication } from './admissions';
+import { transferEnrollment } from './enrollments';
 import { applyDiscount, cancelPayment } from './finance';
 import { getSettings } from '../lib/settings';
 import { notifyLater } from './notify';
@@ -26,7 +27,7 @@ export function registerHandlers() {
 
   registerApprovalHandler('ADMISSION', {
     onApprove: async (tx, r, actor) => {
-      await admitApplication(tx, r.entityId, r.payload ?? {}, actor);
+      await admitApplication(tx, r.entityId, { ...(r.payload ?? {}), approvalRequestId: r.id }, actor);
     },
     onReject: async (tx, r) => {
       await tx.application.update({ where: { id: r.entityId }, data: { status: 'UNDER_REVIEW' } });
@@ -59,10 +60,11 @@ export function registerHandlers() {
   registerApprovalHandler('BATCH_TRANSFER', {
     onApprove: async (tx, r, actor) => {
       const st = await tx.student.findUniqueOrThrow({ where: { id: r.entityId }, include: { batch: true } });
-      const to = await tx.batch.findUniqueOrThrow({ where: { id: r.payload.toBatchId } });
-      await assertBatchAvailable(tx, to.id, to.courseId); // capacity re-checked (and locked) at approval time
-      await tx.student.update({ where: { id: st.id }, data: { batchId: to.id, courseId: to.courseId } });
-      await tx.studentHistory.create({ data: { studentId: st.id, type: 'BATCH', message: `Transferred ${st.batch?.code ?? '—'} → ${to.code}. Reason: ${r.payload.reason}`, userId: actor } });
+      const to = await tx.batch.findUniqueOrThrow({ where: { id: r.payload.toBatchId }, include: { course: true } });
+      // STU-10: the previous enrollment is closed as TRANSFERRED and kept; a new one is opened (capacity re-checked).
+      const out = await transferEnrollment(tx, { studentId: st.id, toBatchId: to.id, reason: r.payload.reason, approvalRequestId: r.id, actorId: actor });
+      const note = out.courseChanged ? ` Course changed to ${to.course.name}: no fee plan is created automatically — Finance must set one up.` : '';
+      await tx.studentHistory.create({ data: { studentId: st.id, type: 'BATCH', message: `${out.closed ? 'Transferred' : 'Batch allotted'} ${st.batch?.code ?? '—'} → ${to.code}. Reason: ${r.payload.reason}.${note}`, userId: actor } });
     },
   });
 
@@ -95,7 +97,7 @@ export function registerHandlers() {
     onApprove: async (tx, r, actor) => {
       await tx.attendance.upsert({
         where: { sessionId_studentId: { sessionId: r.payload.sessionId, studentId: r.payload.studentId } },
-        create: { sessionId: r.payload.sessionId, studentId: r.payload.studentId, status: r.payload.status, markedById: actor },
+        create: { sessionId: r.payload.sessionId, studentId: r.payload.studentId, status: r.payload.status, markedById: actor, enrollmentId: (await tx.enrollment.findFirst({ where: { studentId: r.payload.studentId, status: { in: ['ACTIVE', 'ON_HOLD'] }, batch: { sessions: { some: { id: r.payload.sessionId } } } }, select: { id: true } }))?.id ?? null },
         update: { status: r.payload.status, markedById: actor, markedAt: new Date() },
       });
     },

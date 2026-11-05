@@ -8,6 +8,7 @@ import { normalizeEmail, normalizePhone } from '../lib/util';
 import { UNUSABLE_PASSWORD } from '../lib/password';
 import { issueActivationLink } from '../lib/activation';
 import { createFeePlan } from './finance';
+import { openEnrollment } from './enrollments';
 import { notifyLater } from './notify';
 
 type Tx = Prisma.TransactionClient;
@@ -77,7 +78,7 @@ export async function assertBatchAvailable(tx: Tx, batchId: string, courseId: st
   return b;
 }
 
-export async function admitApplication(tx: Tx, applicationId: string, opts: { batchId?: string | null; installments?: number }, actorId: string) {
+export async function admitApplication(tx: Tx, applicationId: string, opts: { batchId?: string | null; installments?: number; approvalRequestId?: string | null }, actorId: string) {
   const app = await tx.application.findUniqueOrThrow({ where: { id: applicationId }, include: { lead: true } });
   if (app.status === 'ADMITTED') return app.studentId!;
   const data = applicationDataSchema.parse(app.data);
@@ -133,7 +134,12 @@ export async function admitApplication(tx: Tx, applicationId: string, opts: { ba
     await tx.leadActivity.create({ data: { leadId: app.leadId, type: 'STATUS', content: `Admitted as ${studentCode}`, userId: actorId } });
   }
   await tx.studentHistory.create({ data: { studentId: student.id, type: 'STATUS', message: `Admitted to ${student.course.name}${student.batch ? ` (${student.batch.code})` : ''}`, userId: actorId } });
-  await createFeePlan(tx, { studentId: student.id, courseId: app.courseId, installments: opts.installments, startDate: new Date(), userId: actorId });
+  // Enrollment history (20.4): the admission opens the first enrollment, linked to the application and approval.
+  const enrollment = await openEnrollment(tx, {
+    studentId: student.id, courseId: app.courseId, batchId, source: app.source === 'direct' ? 'DIRECT' : 'ADMISSION',
+    applicationId: app.id, approvalRequestId: opts.approvalRequestId ?? null, actorId, capacityChecked: true,
+  });
+  await createFeePlan(tx, { studentId: student.id, courseId: app.courseId, installments: opts.installments, startDate: new Date(), userId: actorId, enrollmentId: enrollment.id });
 
   const act = await issueActivationLink(tx, user.id);
   notifyLater(

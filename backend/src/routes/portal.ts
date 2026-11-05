@@ -43,6 +43,12 @@ r.get('/me', ah(async (req, res) => {
   });
 }));
 
+r.get('/enrollments', ah(async (req, res) => {
+  const s = await me(req);
+  const items = await prisma.enrollment.findMany({ where: { studentId: s.id }, orderBy: { startDate: 'desc' }, select: { id: true, status: true, startDate: true, endedAt: true, source: true, course: { select: { code: true, name: true } }, batch: { select: { code: true, name: true } } } });
+  res.json({ items });
+}));
+
 r.get('/timetable', ah(async (req, res) => {
   const s = await me(req);
   if (!s.batchId) return res.json({ items: [] });

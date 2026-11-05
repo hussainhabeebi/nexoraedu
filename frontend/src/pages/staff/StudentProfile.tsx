@@ -3,13 +3,14 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { AlertTriangle, ArrowLeft, Camera, Eye, Mail, MessageCircle, Phone, Upload } from 'lucide-react';
 import { api, download } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { useBatches, useGet, useMasters, useMut } from '@/lib/hooks';
+import { useBatches, useCourses, useGet, useMasters, useMut } from '@/lib/hooks';
 import { d, dt, inr, label } from '@/lib/format';
 import StudentAccount from '@/components/StudentAccount';
 import WaChat from '@/components/WaChat';
+import EnrollmentHistory from '@/components/EnrollmentHistory';
 import { Avatar, Badge, Card, Confirm, Empty, Input, KV, Modal, PageLoader, Progress, Select, Tabs, Textarea } from '@/components/ui';
 
-type Tab = 'overview' | 'fees' | 'academics' | 'documents' | 'history' | 'whatsapp';
+type Tab = 'overview' | 'enrollments' | 'fees' | 'academics' | 'documents' | 'history' | 'whatsapp';
 const STATUSES = ['ADMITTED', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'WITHDRAWN', 'TERMINATED'];
 
 export default function StudentProfile() {
@@ -19,10 +20,12 @@ export default function StudentProfile() {
   const tab = (sp.get('tab') as Tab) || 'overview';
   const { data: s, isLoading, error } = useGet<any>(`/students/${id}`);
   const docTypes = useMasters('document_type');
-  const batches = useBatches(s?.courseId);
+  const courses = useCourses();
   const [modal, setModal] = useState<'' | 'status' | 'transfer' | 'edit' | 'doc'>('');
   const [st, setSt] = useState({ status: '', reason: '' });
   const [tr, setTr] = useState({ toBatchId: '', reason: '' });
+  const [trCourse, setTrCourse] = useState('');
+  const batches = useBatches(trCourse || s?.courseId);
   const [doc, setDoc] = useState<{ type: string; file: File | null }>({ type: '', file: null });
   const [rej, setRej] = useState<string | null>(null);
   const inv = ['/students', '/dashboard', '/approvals'];
@@ -64,7 +67,7 @@ export default function StudentProfile() {
       </div>
 
       <Tabs value={tab} onChange={setTab} tabs={[
-        { key: 'overview', label: 'Overview' }, ...(s.balance != null ? [{ key: 'fees' as const, label: 'Fees' }] : []), { key: 'academics', label: 'Attendance & results' },
+        { key: 'overview', label: 'Overview' }, { key: 'enrollments', label: 'Enrollments' }, ...(s.balance != null ? [{ key: 'fees' as const, label: 'Fees' }] : []), { key: 'academics', label: 'Attendance & results' },
         { key: 'documents', label: 'Documents', count: s.documents.length }, { key: 'history', label: 'History' }, ...(can('whatsapp:send') ? [{ key: 'whatsapp' as const, label: 'WhatsApp' }] : []),
       ]} />
 
@@ -82,6 +85,7 @@ export default function StudentProfile() {
           </div>
         </div>
       )}
+      {tab === 'enrollments' && <EnrollmentHistory studentId={s.id} />}
       {tab === 'fees' && <StudentAccount studentId={s.id} />}
       {tab === 'academics' && (
         <div className="grid gap-6 lg:grid-cols-2">
@@ -112,8 +116,10 @@ export default function StudentProfile() {
       <Modal open={modal === 'status'} onClose={() => setModal('')} title="Change status" size="sm" footer={<button className="btn-primary" disabled={st.reason.length < 3 || statusM.isPending} onClick={() => statusM.mutate(undefined)}>Update</button>}>
         <div className="space-y-3"><Select label="New status" value={st.status} onChange={(e) => setSt({ ...st, status: e.target.value })} options={STATUSES.map((x) => ({ value: x, label: label(x) }))} /><Textarea label="Reason" required value={st.reason} onChange={(e) => setSt({ ...st, reason: e.target.value })} /></div>
       </Modal>
-      <Modal open={modal === 'transfer'} onClose={() => setModal('')} title="Batch transfer" size="sm" footer={<button className="btn-primary" disabled={!tr.toBatchId || tr.reason.length < 3 || trM.isPending} onClick={() => trM.mutate(undefined)}>Send for approval</button>}>
-        <div className="space-y-3"><Select label="Move to batch" value={tr.toBatchId} onChange={(e) => setTr({ ...tr, toBatchId: e.target.value })} placeholder="Select" options={(batches.data?.items ?? []).filter((b) => b.id !== s.batchId).map((b) => ({ value: b.id, label: `${b.code} (${b._count.students}/${b.capacity})` }))} /><Textarea label="Reason" required value={tr.reason} onChange={(e) => setTr({ ...tr, reason: e.target.value })} /></div>
+      <Modal open={modal === 'transfer'} onClose={() => setModal('')} title="Batch transfer / course change" size="sm" footer={<button className="btn-primary" disabled={!tr.toBatchId || tr.reason.length < 3 || trM.isPending} onClick={() => trM.mutate(undefined)}>Send for approval</button>}>
+        <div className="space-y-3"><Select label="Course" value={trCourse || s.courseId} onChange={(e) => { setTrCourse(e.target.value); setTr({ ...tr, toBatchId: '' }); }} options={(courses.data?.items ?? []).filter((c) => c.isActive).map((c) => ({ value: c.id, label: c.name }))} />
+          {(trCourse || s.courseId) !== s.courseId && <p className="rounded-lg bg-amber-50 p-2 text-xs text-amber-800">Course change: the current enrollment is closed as Transferred and a new one is opened after approval. No fee plan is created automatically.</p>}
+          <Select label="Move to batch" value={tr.toBatchId} onChange={(e) => setTr({ ...tr, toBatchId: e.target.value })} placeholder="Select" options={(batches.data?.items ?? []).filter((b) => b.id !== s.batchId).map((b) => ({ value: b.id, label: `${b.code} (${b._count.students}/${b.capacity})` }))} /><Textarea label="Reason" required value={tr.reason} onChange={(e) => setTr({ ...tr, reason: e.target.value })} /></div>
       </Modal>
       <Modal open={modal === 'doc'} onClose={() => setModal('')} title="Upload document" size="sm" footer={<button className="btn-primary" disabled={!doc.type || !doc.file || docM.isPending} onClick={() => docM.mutate(undefined)}>Upload</button>}>
         <div className="space-y-3"><Select label="Type" value={doc.type} onChange={(e) => setDoc({ ...doc, type: e.target.value })} placeholder="Select" options={(docTypes.data?.items ?? []).map((t) => ({ value: t.code, label: t.label }))} /><Input label="File (PDF/JPG/PNG, max 5 MB)" type="file" accept="application/pdf,image/*" onChange={(e) => setDoc({ ...doc, file: e.target.files?.[0] ?? null })} /></div>

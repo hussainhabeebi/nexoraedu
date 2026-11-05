@@ -30,3 +30,6 @@ SELECT format('GRANT UPDATE (status, error, "updatedAt", attempts) ON notificati
 
 -- Migration bookkeeping is not the API's business.
 SELECT format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON _prisma_migrations FROM %I', :'app_role') \gexec
+
+-- Enrollment history is never deleted (status changes only).
+SELECT format('REVOKE DELETE, TRUNCATE ON enrollments FROM %I', :'app_role') WHERE to_regclass('enrollments') IS NOT NULL \gexec

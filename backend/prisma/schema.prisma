@@ -16,6 +16,7 @@ model Setting {
   key       String   @id
   value     Json
   updatedAt DateTime @updatedAt
+
   @@map("settings")
 }
 
@@ -23,6 +24,7 @@ model Sequence {
   name   String @id
   prefix String @default("")
   next   Int    @default(1)
+
   @@map("sequences")
 }
 
@@ -34,6 +36,7 @@ model Branch {
   isActive  Boolean  @default(true)
   users     User[]
   createdAt DateTime @default(now())
+
   @@map("branches")
 }
 
@@ -44,6 +47,7 @@ model Department {
   isActive  Boolean  @default(true)
   users     User[]   @relation("DeptUsers")
   createdAt DateTime @default(now())
+
   @@map("departments")
 }
 
@@ -56,6 +60,7 @@ model Role {
   isSystem    Boolean    @default(false)
   users       UserRole[]
   createdAt   DateTime   @default(now())
+
   @@map("roles")
 }
 
@@ -89,6 +94,7 @@ model User {
   notifications      Notification[]
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
+
   @@map("users")
 }
 
@@ -97,6 +103,7 @@ model UserRole {
   roleId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   role   Role   @relation(fields: [roleId], references: [id])
+
   @@id([userId, roleId])
   @@map("user_roles")
 }
@@ -116,6 +123,7 @@ model Session {
   expiresAt     DateTime
   revokedAt     DateTime?
   revokedReason String?
+
   @@index([userId])
   @@index([familyId])
   @@map("sessions")
@@ -130,6 +138,7 @@ model MfaFactor {
   confirmedAt  DateTime?
   lastUsedStep Int       @default(0)
   createdAt    DateTime  @default(now())
+
   @@map("mfa_factors")
 }
 
@@ -139,6 +148,7 @@ model MfaRecoveryCode {
   codeHash  String
   usedAt    DateTime?
   createdAt DateTime  @default(now())
+
   @@index([userId])
   @@map("mfa_recovery_codes")
 }
@@ -153,6 +163,7 @@ model MfaChallenge {
   expiresAt DateTime
   usedAt    DateTime?
   createdAt DateTime  @default(now())
+
   @@map("mfa_challenges")
 }
 
@@ -162,6 +173,7 @@ model PasswordHistory {
   userId    String
   hash      String
   createdAt DateTime @default(now())
+
   @@index([userId, createdAt])
   @@map("password_history")
 }
@@ -175,6 +187,7 @@ model PasswordReset {
   expiresAt DateTime
   usedAt    DateTime?
   createdAt DateTime  @default(now())
+
   @@map("password_resets")
 }
 
@@ -189,6 +202,7 @@ model MasterItem {
   sortOrder Int      @default(0)
   meta      Json?
   createdAt DateTime @default(now())
+
   @@unique([type, code])
   @@index([type])
   @@map("master_items")
@@ -217,8 +231,10 @@ model Course {
   feeComponents       FeeComponent[]
   leads               Lead[]
   students            Student[]
+  enrollments         Enrollment[]
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt
+
   @@map("courses")
 }
 
@@ -233,6 +249,7 @@ model Subject {
   credits  Int?
   isActive Boolean  @default(true)
   modules  Module[]
+
   @@unique([courseId, code])
   @@map("subjects")
 }
@@ -246,25 +263,28 @@ model Module {
   hours     Int     @default(0)
   isActive  Boolean @default(true)
   completed Boolean @default(false)
+
   @@map("modules")
 }
 
 model Batch {
-  id         String             @id @default(cuid())
-  code       String             @unique
-  name       String
-  courseId   String
-  course     Course             @relation(fields: [courseId], references: [id])
-  startDate  DateTime
-  endDate    DateTime?
-  timing     String?
-  capacity   Int                @default(30)
-  mode       String             @default("Classroom")
-  status     BatchStatus        @default(PLANNED)
-  students   Student[]
-  sessions   TimetableSession[]
+  id          String              @id @default(cuid())
+  code        String              @unique
+  name        String
+  courseId    String
+  course      Course              @relation(fields: [courseId], references: [id])
+  startDate   DateTime
+  endDate     DateTime?
+  timing      String?
+  capacity    Int                 @default(30)
+  mode        String              @default("Classroom")
+  status      BatchStatus         @default(PLANNED)
+  students    Student[]
+  enrollments Enrollment[]
+  sessions    TimetableSession[]
   allocations FacultyAllocation[]
-  createdAt  DateTime           @default(now())
+  createdAt   DateTime            @default(now())
+
   @@index([courseId])
   @@map("batches")
 }
@@ -283,15 +303,17 @@ model FacultyProfile {
   qualifications String?
   subjects       String[] @default([])
   availability   Json?
+
   @@map("faculty_profiles")
 }
 
 model FacultyAllocation {
-  id        String  @id @default(cuid())
+  id        String @id @default(cuid())
   batchId   String
-  batch     Batch   @relation(fields: [batchId], references: [id])
+  batch     Batch  @relation(fields: [batchId], references: [id])
   subjectId String
   facultyId String
+
   @@unique([batchId, subjectId, facultyId])
   @@map("faculty_allocations")
 }
@@ -310,20 +332,25 @@ model TimetableSession {
   cancelled  Boolean      @default(false)
   attendance Attendance[]
   createdAt  DateTime     @default(now())
+
   @@index([batchId, startsAt])
   @@index([facultyId, startsAt])
   @@map("timetable_sessions")
 }
 
 model Attendance {
-  id         String           @id @default(cuid())
-  sessionId  String
-  session    TimetableSession @relation(fields: [sessionId], references: [id])
-  studentId  String
-  student    Student          @relation(fields: [studentId], references: [id])
-  status     AttendanceStatus
-  markedById String
-  markedAt   DateTime         @default(now())
+  id           String           @id @default(cuid())
+  sessionId    String
+  session      TimetableSession @relation(fields: [sessionId], references: [id])
+  studentId    String
+  student      Student          @relation(fields: [studentId], references: [id])
+  /// Enrollment the attendance belongs to (NULL for rows that could not be attributed during backfill)
+  enrollmentId String?
+  enrollment   Enrollment?      @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
+  status       AttendanceStatus
+  markedById   String
+  markedAt     DateTime         @default(now())
+
   @@unique([sessionId, studentId])
   @@index([studentId])
   @@map("attendance")
@@ -346,6 +373,7 @@ model Material {
   url          String
   uploadedById String
   createdAt    DateTime @default(now())
+
   @@map("materials")
 }
 
@@ -360,6 +388,7 @@ model Assignment {
   createdById String
   submissions Submission[]
   createdAt   DateTime     @default(now())
+
   @@map("assignments")
 }
 
@@ -374,6 +403,7 @@ model Submission {
   late         Boolean    @default(false)
   marks        Float?
   feedback     String?
+
   @@unique([assignmentId, studentId])
   @@map("submissions")
 }
@@ -421,6 +451,7 @@ model Lead {
   applications           Application[]
   createdAt              DateTime             @default(now())
   updatedAt              DateTime             @updatedAt
+
   @@index([phoneNormalized])
   @@index([emailNormalized])
   @@index([ownerId, status])
@@ -440,6 +471,7 @@ model LeadActivity {
   userId    String?
   meta      Json?
   createdAt DateTime @default(now())
+
   @@index([leadId, createdAt])
   @@map("lead_activities")
 }
@@ -456,20 +488,22 @@ model FollowUp {
   completedAt DateTime?
   reminded    Boolean   @default(false)
   createdAt   DateTime  @default(now())
+
   @@index([userId, status, dueAt])
   @@map("follow_ups")
 }
 
 model CounsellingSession {
-  id             String   @id @default(cuid())
-  leadId         String
-  lead           Lead     @relation(fields: [leadId], references: [id])
-  counselorId    String
-  date           DateTime @default(now())
-  courseAdvised  String?
-  remarks        String?
-  outcome        String?
-  createdAt      DateTime @default(now())
+  id            String   @id @default(cuid())
+  leadId        String
+  lead          Lead     @relation(fields: [leadId], references: [id])
+  counselorId   String
+  date          DateTime @default(now())
+  courseAdvised String?
+  remarks       String?
+  outcome       String?
+  createdAt     DateTime @default(now())
+
   @@map("counselling_sessions")
 }
 
@@ -483,20 +517,22 @@ enum ApplicationStatus {
 }
 
 model Application {
-  id        String            @id @default(cuid())
-  code      String            @unique
-  leadId    String?
-  lead      Lead?             @relation(fields: [leadId], references: [id])
-  courseId  String
-  batchId   String?
-  data      Json
-  status    ApplicationStatus @default(SUBMITTED)
-  remarks   String?
-  studentId String?
-  source    String            @default("staff")
-  documents Document[]
-  createdAt DateTime          @default(now())
-  updatedAt DateTime          @updatedAt
+  id          String            @id @default(cuid())
+  code        String            @unique
+  leadId      String?
+  lead        Lead?             @relation(fields: [leadId], references: [id])
+  courseId    String
+  batchId     String?
+  data        Json
+  status      ApplicationStatus @default(SUBMITTED)
+  remarks     String?
+  studentId   String?
+  source      String            @default("staff")
+  documents   Document[]
+  enrollments Enrollment[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
   @@map("applications")
 }
 
@@ -513,42 +549,81 @@ enum StudentStatus {
 }
 
 model Student {
-  id              String           @id @default(cuid())
-  studentCode     String           @unique
-  userId          String?          @unique
-  user            User?            @relation("StudentUser", fields: [userId], references: [id])
-  fullName        String
-  dob             DateTime
-  gender          String
-  phone           String
-  phoneNormalized String           @unique
-  email           String
-  emailNormalized String           @unique
-  address         String
-  city            String?
-  photoUrl        String?
-  status          StudentStatus    @default(ADMITTED)
-  courseId        String
-  course          Course           @relation(fields: [courseId], references: [id])
-  batchId         String?
-  batch           Batch?           @relation(fields: [batchId], references: [id])
-  admissionDate   DateTime         @default(now())
+  id                String           @id @default(cuid())
+  studentCode       String           @unique
+  userId            String?          @unique
+  user              User?            @relation("StudentUser", fields: [userId], references: [id])
+  fullName          String
+  dob               DateTime
+  gender            String
+  phone             String
+  phoneNormalized   String           @unique
+  email             String
+  emailNormalized   String           @unique
+  address           String
+  city              String?
+  photoUrl          String?
+  status            StudentStatus    @default(ADMITTED)
+  courseId          String
+  course            Course           @relation(fields: [courseId], references: [id])
+  batchId           String?
+  batch             Batch?           @relation(fields: [batchId], references: [id])
+  admissionDate     DateTime         @default(now())
   chatwootContactId Int?
-  lead            Lead?
-  guardians       Guardian[]
-  education       Education[]
-  documents       Document[]
-  history         StudentHistory[]
-  feePlans        FeePlan[]
-  payments        Payment[]
-  attendance      Attendance[]
-  attempts        ExamAttempt[]
-  results         Result[]
-  certificates    Certificate[]
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  lead              Lead?
+  guardians         Guardian[]
+  education         Education[]
+  documents         Document[]
+  history           StudentHistory[]
+  feePlans          FeePlan[]
+  payments          Payment[]
+  attendance        Attendance[]
+  attempts          ExamAttempt[]
+  results           Result[]
+  certificates      Certificate[]
+  enrollments       Enrollment[]
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
   @@index([courseId, batchId, status])
   @@map("students")
+}
+
+/// Enrollment history (SRS 20.4, 20.12, STU-09/10, 21.3). One row per course/batch period; rows are never deleted.
+/// At most one CURRENT enrollment (ACTIVE or ON_HOLD) per student — partial unique index in the migration.
+/// students.courseId/batchId mirror the current enrollment for existing code paths.
+model Enrollment {
+  id                   String       @id @default(cuid())
+  studentId            String
+  student              Student      @relation(fields: [studentId], references: [id])
+  courseId             String
+  course               Course       @relation(fields: [courseId], references: [id])
+  batchId              String?
+  batch                Batch?       @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  /// ACTIVE, ON_HOLD (current) · COMPLETED, TRANSFERRED, WITHDRAWN, TERMINATED, CANCELLED (closed)
+  status               String       @default("ACTIVE")
+  startDate            DateTime     @default(now())
+  endedAt              DateTime?
+  endReason            String?
+  /// ADMISSION, DIRECT, TRANSFER, COURSE_CHANGE, REACTIVATION, BACKFILL
+  source               String
+  applicationId        String?
+  application          Application? @relation(fields: [applicationId], references: [id], onDelete: Restrict)
+  /// Approval that authorised this enrollment (ADMISSION or BATCH_TRANSFER request), when there was one
+  approvalRequestId    String?
+  previousEnrollmentId String?
+  previous             Enrollment?  @relation("EnrollmentChain", fields: [previousEnrollmentId], references: [id], onDelete: Restrict)
+  next                 Enrollment[] @relation("EnrollmentChain")
+  createdById          String?
+  feePlans             FeePlan[]
+  attendance           Attendance[]
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+
+  @@index([studentId, startDate])
+  @@index([batchId, status])
+  @@index([courseId])
+  @@map("enrollments")
 }
 
 model Guardian {
@@ -560,6 +635,7 @@ model Guardian {
   phone      String
   email      String?
   occupation String?
+
   @@map("guardians")
 }
 
@@ -572,6 +648,7 @@ model Education {
   board       String?
   year        Int?
   marks       String?
+
   @@map("education")
 }
 
@@ -591,6 +668,7 @@ model Document {
   verifiedAt    DateTime?
   remarks       String?
   createdAt     DateTime     @default(now())
+
   @@map("documents")
 }
 
@@ -603,6 +681,7 @@ model StudentHistory {
   data      Json?
   userId    String?
   createdAt DateTime @default(now())
+
   @@index([studentId, createdAt])
   @@map("student_history")
 }
@@ -618,6 +697,7 @@ model FeeComponent {
   taxPercent    Decimal  @default(0) @db.Decimal(5, 2)
   effectiveFrom DateTime @default(now())
   isActive      Boolean  @default(true)
+
   @@map("fee_components")
 }
 
@@ -633,36 +713,42 @@ model FeePlan {
   /// academy time zone. NULL = plan created before the policy existed (its due dates are kept unchanged).
   dueAnchorDay Int?
   dueTimeZone  String?
+  /// Enrollment this plan bills (NULL only for legacy plans whose course no longer matches any enrollment)
+  enrollmentId String?
+  enrollment   Enrollment?   @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
   installments Installment[]
   createdAt    DateTime      @default(now())
+
   @@map("fee_plans")
 }
 
 model Installment {
-  id         String              @id @default(cuid())
-  feePlanId  String
-  feePlan    FeePlan             @relation(fields: [feePlanId], references: [id])
-  seq        Int
-  amount     Decimal             @db.Decimal(12, 2)
-  paidAmount Decimal             @default(0) @db.Decimal(12, 2)
-  dueDate    DateTime
-  status     String              @default("DUE") // DUE, PARTIAL, PAID
+  id             String              @id @default(cuid())
+  feePlanId      String
+  feePlan        FeePlan             @relation(fields: [feePlanId], references: [id])
+  seq            Int
+  amount         Decimal             @db.Decimal(12, 2)
+  paidAmount     Decimal             @default(0) @db.Decimal(12, 2)
+  dueDate        DateTime
+  status         String              @default("DUE") // DUE, PARTIAL, PAID
   lastReminderAt DateTime?
-  allocations PaymentAllocation[]
+  allocations    PaymentAllocation[]
+
   @@index([dueDate, status])
   @@map("installments")
 }
 
 model Invoice {
-  id            String   @id @default(cuid())
-  number        String   @unique
+  id            String    @id @default(cuid())
+  number        String    @unique
   studentId     String
   feePlanId     String
   installmentId String?
-  amount        Decimal  @db.Decimal(12, 2)
-  issuedAt      DateTime @default(now())
+  amount        Decimal   @db.Decimal(12, 2)
+  issuedAt      DateTime  @default(now())
   dueDate       DateTime?
-  status        String   @default("ISSUED")
+  status        String    @default("ISSUED")
+
   @@map("invoices")
 }
 
@@ -682,6 +768,7 @@ model Payment {
   gatewayRef     String?             @unique
   allocations    PaymentAllocation[]
   createdAt      DateTime            @default(now())
+
   @@index([paidAt])
   @@map("payments")
 }
@@ -693,6 +780,7 @@ model PaymentAllocation {
   installmentId String
   installment   Installment @relation(fields: [installmentId], references: [id])
   amount        Decimal     @db.Decimal(12, 2)
+
   @@map("payment_allocations")
 }
 
@@ -708,83 +796,88 @@ model LedgerEntry {
   narration String
   userId    String?
   createdAt DateTime @default(now())
+
   @@index([studentId, createdAt])
   @@map("ledger_entries")
 }
 
 model Refund {
-  id          String    @id @default(cuid())
-  studentId   String
-  amount      Decimal   @db.Decimal(12, 2)
-  reason      String
-  status      String    @default("PENDING_APPROVAL") // PENDING_APPROVAL, APPROVED, PAID, REJECTED
-  reference   String?
-  paidAt      DateTime?
+  id            String    @id @default(cuid())
+  studentId     String
+  amount        Decimal   @db.Decimal(12, 2)
+  reason        String
+  status        String    @default("PENDING_APPROVAL") // PENDING_APPROVAL, APPROVED, PAID, REJECTED
+  reference     String?
+  paidAt        DateTime?
   requestedById String
-  createdAt   DateTime  @default(now())
+  createdAt     DateTime  @default(now())
+
   @@map("refunds")
 }
 
 model Discount {
-  id        String   @id @default(cuid())
-  studentId String
-  feePlanId String
-  kind      String // FIXED, PERCENT, SCHOLARSHIP
-  value     Decimal  @db.Decimal(12, 2)
-  amount    Decimal  @db.Decimal(12, 2)
-  reason    String
-  status    String   @default("PENDING_APPROVAL")
+  id            String   @id @default(cuid())
+  studentId     String
+  feePlanId     String
+  kind          String // FIXED, PERCENT, SCHOLARSHIP
+  value         Decimal  @db.Decimal(12, 2)
+  amount        Decimal  @db.Decimal(12, 2)
+  reason        String
+  status        String   @default("PENDING_APPROVAL")
   requestedById String
-  createdAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+
   @@map("discounts")
 }
 
 // ───────────────────────────── Examination ─────────────────────────────
 
 model Question {
-  id            String   @id @default(cuid())
+  id            String         @id @default(cuid())
   courseId      String
   subjectId     String?
   topic         String?
-  difficulty    String   @default("MEDIUM")
+  difficulty    String         @default("MEDIUM")
   type          String // MCQ_SINGLE, MCQ_MULTI, TRUE_FALSE, SHORT, LONG
   text          String
   options       Json?
   correct       Json?
-  marks         Float    @default(1)
-  negativeMarks Float    @default(0)
-  status        String   @default("ACTIVE") // ACTIVE, RETIRED
-  createdAt     DateTime @default(now())
+  marks         Float          @default(1)
+  negativeMarks Float          @default(0)
+  status        String         @default("ACTIVE") // ACTIVE, RETIRED
+  createdAt     DateTime       @default(now())
   exams         ExamQuestion[]
+
   @@index([courseId, subjectId])
   @@map("questions")
 }
 
 model Exam {
-  id            String           @id @default(cuid())
-  code          String           @unique
-  title         String
-  courseId      String
-  batchId       String?
-  subjectId     String?
-  type          String           @default("MODULE_TEST")
-  mode          String           @default("ONLINE")
-  startAt       DateTime
-  endAt         DateTime
-  durationMin   Int              @default(60)
-  totalMarks    Float            @default(100)
-  passMarks     Float            @default(40)
-  weightage     Float            @default(100)
-  instructions  String?
-  attemptLimit  Int              @default(1)
-  shuffle       Boolean          @default(true)
-  status        String           @default("DRAFT") // DRAFT, SCHEDULED, COMPLETED
-  resultsPublished Boolean       @default(false)
-  questions     ExamQuestion[]
-  assignments   ExamAssignment[]
-  attempts      ExamAttempt[]
-  results       Result[]
-  createdAt     DateTime         @default(now())
+  id               String           @id @default(cuid())
+  code             String           @unique
+  title            String
+  courseId         String
+  batchId          String?
+  subjectId        String?
+  type             String           @default("MODULE_TEST")
+  mode             String           @default("ONLINE")
+  startAt          DateTime
+  endAt            DateTime
+  durationMin      Int              @default(60)
+  totalMarks       Float            @default(100)
+  passMarks        Float            @default(40)
+  weightage        Float            @default(100)
+  instructions     String?
+  attemptLimit     Int              @default(1)
+  shuffle          Boolean          @default(true)
+  status           String           @default("DRAFT") // DRAFT, SCHEDULED, COMPLETED
+  resultsPublished Boolean          @default(false)
+  questions        ExamQuestion[]
+  assignments      ExamAssignment[]
+  attempts         ExamAttempt[]
+  results          Result[]
+  createdAt        DateTime         @default(now())
+
   @@map("exams")
 }
 
@@ -795,6 +888,7 @@ model ExamQuestion {
   questionId String
   question   Question @relation(fields: [questionId], references: [id])
   order      Int
+
   @@unique([examId, questionId])
   @@map("exam_questions")
 }
@@ -804,26 +898,28 @@ model ExamAssignment {
   examId    String
   exam      Exam   @relation(fields: [examId], references: [id])
   studentId String
+
   @@unique([examId, studentId])
   @@map("exam_assignments")
 }
 
 model ExamAttempt {
-  id           String    @id @default(cuid())
-  examId       String
-  exam         Exam      @relation(fields: [examId], references: [id])
-  studentId    String
-  student      Student   @relation(fields: [studentId], references: [id])
-  startedAt    DateTime  @default(now())
-  submittedAt  DateTime?
-  ip           String?
+  id            String    @id @default(cuid())
+  examId        String
+  exam          Exam      @relation(fields: [examId], references: [id])
+  studentId     String
+  student       Student   @relation(fields: [studentId], references: [id])
+  startedAt     DateTime  @default(now())
+  submittedAt   DateTime?
+  ip            String?
   questionOrder Json
-  answers      Json      @default("{}")
-  autoScore    Float?
-  manualScore  Float?
-  manualMarks  Json?
-  status       String    @default("IN_PROGRESS") // IN_PROGRESS, SUBMITTED, EVALUATED
-  tabSwitches  Int       @default(0)
+  answers       Json      @default("{}")
+  autoScore     Float?
+  manualScore   Float?
+  manualMarks   Json?
+  status        String    @default("IN_PROGRESS") // IN_PROGRESS, SUBMITTED, EVALUATED
+  tabSwitches   Int       @default(0)
+
   @@index([examId, studentId])
   @@map("exam_attempts")
 }
@@ -842,20 +938,22 @@ model Result {
   remarks    String?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+
   @@unique([examId, studentId])
   @@map("results")
 }
 
 model Certificate {
-  id               String   @id @default(cuid())
-  number           String   @unique
+  id               String    @id @default(cuid())
+  number           String    @unique
   studentId        String
-  student          Student  @relation(fields: [studentId], references: [id])
+  student          Student   @relation(fields: [studentId], references: [id])
   courseId         String
-  verificationCode String   @unique
-  status           String   @default("PENDING_APPROVAL") // PENDING_APPROVAL, ISSUED, REVOKED
+  verificationCode String    @unique
+  status           String    @default("PENDING_APPROVAL") // PENDING_APPROVAL, ISSUED, REVOKED
   issuedAt         DateTime?
-  createdAt        DateTime @default(now())
+  createdAt        DateTime  @default(now())
+
   @@map("certificates")
 }
 
@@ -868,6 +966,7 @@ model ApprovalWorkflow {
   /// [{ level: 1, role: "finance_manager", minAmount?: number }]
   levels   Json
   isActive Boolean @default(true)
+
   @@map("approval_workflows")
 }
 
@@ -886,6 +985,7 @@ model ApprovalRequest {
   actions       ApprovalAction[]
   createdAt     DateTime         @default(now())
   decidedAt     DateTime?
+
   @@index([status, type])
   @@map("approval_requests")
 }
@@ -901,6 +1001,7 @@ model ApprovalAction {
   ip        String?
   userAgent String?
   createdAt DateTime        @default(now())
+
   @@map("approval_actions")
 }
 
@@ -920,6 +1021,7 @@ model NotificationTemplate {
   version        Int      @default(1)
   isActive       Boolean  @default(true)
   updatedAt      DateTime @updatedAt
+
   @@map("notification_templates")
 }
 
@@ -932,6 +1034,7 @@ model Notification {
   link      String?
   readAt    DateTime?
   createdAt DateTime  @default(now())
+
   @@index([userId, readAt])
   @@map("notifications")
 }
@@ -948,6 +1051,7 @@ model NotificationLog {
   attempts    Int      @default(1)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
   @@index([providerRef])
   @@map("notification_logs")
 }
@@ -967,21 +1071,23 @@ model AuditLog {
   userAgent String?
   requestId String?
   createdAt DateTime @default(now())
+
   @@index([entity, entityId])
   @@index([createdAt])
   @@map("audit_logs")
 }
 
 model LoginLog {
-  id        String   @id @default(cuid())
-  userId    String?
+  id         String   @id @default(cuid())
+  userId     String?
   /// LOGIN_OK, LOGIN_FAIL, LOCKED, LOGOUT, MFA_OK, MFA_FAIL, MFA_ENROLLED, MFA_RESET, PASSWORD_CHANGE, PASSWORD_RESET, SESSION_REVOKED, TOKEN_REUSE
-  event     String   @default("LOGIN")
+  event      String   @default("LOGIN")
   identifier String
-  success   Boolean
-  ip        String?
-  userAgent String?
-  createdAt DateTime @default(now())
+  success    Boolean
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
   @@map("login_logs")
 }
 
@@ -994,6 +1100,7 @@ model IntegrationLog {
   durationMs Int
   error      String?
   createdAt  DateTime @default(now())
+
   @@index([name, createdAt])
   @@map("integration_logs")
 }

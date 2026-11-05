@@ -83,6 +83,7 @@ const MATRIX: Record<string, Exp> = {
   'PATCH /students/:id': STU_W, 'POST /students/:id/status': ['sa', 'admin', 'acad'], 'POST /students/:id/transfer': ['sa', 'admin', 'acad'],
   'POST /students/:id/guardians': STU_W, 'DELETE /students/:id/guardians/:gid': STU_W, 'POST /students/:id/education': STU_W,
   'DELETE /students/:id/education/:eid': STU_W, 'POST /students/:id/photo': STU_W, 'POST /students/:id/documents': STU_W,
+  'GET /students/:id/enrollments': STAFF, 'POST /students/:id/enrollments/:eid/cancel': STU_W, // 20.4 history (scoped); cancel = Admin
   'GET /documents/pending': DOCS, 'POST /documents/:id/verify': DOCS, 'GET /documents/:id/download': DOCS,
   // ── Academics (Mgmt R, Admin R, AcadMgr CRUDA, Faculty CRU own batch) ──
   'GET /academics/courses': STAFF, 'GET /academics/courses/:id': STAFF, // LOOKUP (course pickers in CRM/finance/exams)
@@ -119,7 +120,7 @@ const MATRIX: Record<string, Exp> = {
   'GET /whatsapp/conversations/:id/messages': WA, 'POST /whatsapp/conversations/:id/status': WA, 'POST /whatsapp/conversations/:id/reply': WA,
   'POST /whatsapp/leads/:id/send': WA, 'GET /whatsapp/leads/:id/messages': WA, 'POST /whatsapp/students/:id/send': WA, 'POST /whatsapp/bulk': WA,
   // ── Student portal (own records only) ──
-  'GET /portal/me': STUDENT, 'GET /portal/timetable': STUDENT, 'GET /portal/attendance': STUDENT, 'GET /portal/fees': STUDENT,
+  'GET /portal/me': STUDENT, 'GET /portal/enrollments': STUDENT, 'GET /portal/timetable': STUDENT, 'GET /portal/attendance': STUDENT, 'GET /portal/fees': STUDENT,
   'GET /portal/payments/:id/receipt.pdf': STUDENT, 'GET /portal/materials': STUDENT, 'GET /portal/assignments': STUDENT, 'POST /portal/assignments/:id/submit': STUDENT,
   'GET /portal/results': STUDENT, 'GET /portal/certificates': STUDENT, 'GET /portal/certificates/:id/pdf': STUDENT, 'GET /portal/exams': STUDENT,
   'POST /portal/exams/:id/start': STUDENT, 'PUT /portal/attempts/:id/answers': STUDENT, 'POST /portal/attempts/:id/event': STUDENT, 'POST /portal/attempts/:id/submit': STUDENT,

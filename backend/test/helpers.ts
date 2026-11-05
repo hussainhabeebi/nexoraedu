@@ -73,6 +73,8 @@ export async function makeStudent(opts: { ownerId?: string; batchId?: string | n
       address: 'Synthetic address 1', courseId: course.id, batchId: opts.batchId === undefined ? course.batches[0].id : opts.batchId, status: 'ACTIVE',
     },
   });
+  // Mirror the real model: every student has an enrollment for its course/batch (20.4).
+  await prisma.enrollment.create({ data: { studentId: st.id, courseId: st.courseId, batchId: st.batchId, status: 'ACTIVE', source: 'DIRECT' } });
   if (opts.ownerId) await prisma.lead.create({ data: { code: `LD-T-${n}`, name: st.fullName, phone, phoneNormalized: phone, email, emailNormalized: email, ownerId: opts.ownerId, status: 'ADMITTED', studentId: st.id } });
   return st;
 }
