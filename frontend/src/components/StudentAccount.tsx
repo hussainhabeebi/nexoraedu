@@ -69,7 +69,7 @@ function FeeAdjustmentModal({ open, onClose, studentId, plan, unpaid }: { open: 
           </div>
         )}
         <Textarea label="Reason" required value={reason} onChange={(e) => setReason(e.target.value)} hint="At least 5 characters. Shown to the approvers and kept in the audit history." />
-        <p className="text-xs text-slate-500">Needs Finance Manager approval (Management above the configured threshold). Nothing changes until it is approved; if payments change the unpaid amount meanwhile, the request must be re-submitted.</p>
+        <p className="text-xs text-slate-500">{kind === 'WAIVER' ? 'Needs Finance Manager approval, and Management at or above the configured threshold.' : 'A custom plan forgives nothing, so it needs Finance Manager approval only.'} Nothing changes until it is approved; if payments change the unpaid amount meanwhile, the request must be re-submitted.</p>
       </div>
     </Modal>
   );
@@ -86,12 +86,15 @@ export default function StudentAccount({ studentId }: { studentId: string }) {
   const [disc, setDisc] = useState({ kind: 'FIXED', value: '', reason: '' });
   const [ref, setRef] = useState({ amount: '', reason: '' });
   const [plan, setPlan] = useState('1');
+  const [planReason, setPlanReason] = useState('');
   const inv = ['/finance', '/students', '/dashboard', '/approvals'];
   const cancelM = useMut((reason: string) => api(`/finance/payments/${cancel.id}/cancel-request`, { body: { reason } }), { success: 'Cancellation sent for approval', invalidate: inv, onSuccess: () => setCancel(null) });
   const discM = useMut(() => api('/finance/discounts', { body: { studentId, feePlanId: p?.id, ...disc, value: Number(disc.value) } }), { success: (r: any) => (r.approval.status === 'APPROVED' ? 'Discount applied' : 'Discount sent for approval'), invalidate: inv, onSuccess: () => setModal('') });
   const refM = useMut(() => api('/finance/refunds', { body: { studentId, amount: Number(ref.amount), reason: ref.reason } }), { success: 'Refund request sent for approval', invalidate: inv, onSuccess: () => setModal('') });
   const payRefM = useMut((reference: string) => api(`/finance/refunds/${payRefund.id}/pay`, { body: { reference } }), { success: 'Refund marked paid', invalidate: inv, onSuccess: () => setPayRefund(null) });
-  const planM = useMut(() => api(`/finance/students/${studentId}/fee-plan`, { body: { installments: Number(plan) } }), { success: 'Fee plan created', invalidate: inv, onSuccess: () => setModal('') });
+  const planM = useMut(() => api(`/finance/students/${studentId}/fee-plan`, { body: { installments: Number(plan), ...(planReason.trim() && { reason: planReason.trim() }) } }), {
+    success: (r: any) => (r.needsApproval ? 'New fee plan sent for approval' : 'Fee plan created'), invalidate: inv, onSuccess: () => { setModal(''); setPlanReason(''); },
+  });
 
   if (isLoading || !data) return <PageLoader />;
   // Plans are newest first; after a course change the student can have one plan per course enrollment.
@@ -130,7 +133,12 @@ export default function StudentAccount({ studentId }: { studentId: string }) {
         {can('finance:collect', 'finance:manage') && p && <button className="btn-secondary" onClick={() => setModal('discount')}><Percent className="h-4 w-4" /> Discount / scholarship</button>}
         {can('finance:collect', 'finance:manage') && receivedAll > 0 && <button className="btn-secondary" onClick={() => setModal('refund')}><Undo2 className="h-4 w-4" /> Request refund</button>}
         {can('finance:collect', 'finance:manage') && p && unpaid > 0 && <button className="btn-secondary" disabled={!!pendingAdj} title={pendingAdj ? 'An adjustment for this plan is awaiting approval' : undefined} onClick={() => setModal('adjust')}><CalendarClock className="h-4 w-4" /> Fee adjustment</button>}
-        {can('finance:manage') && !p && <button className="btn-primary" onClick={() => setModal('plan')}>Create fee plan</button>}
+        {/* B2: a plan for a course the student was already billed for needs approval (decision 2026-11-06). */}
+        {can('finance:manage') && data.newPlan?.allowed && (
+          <button className={p ? 'btn-secondary' : 'btn-primary'} disabled={!!data.newPlan.pendingAdjustmentId} title={data.newPlan.pendingAdjustmentId ? 'A new fee plan for this student is awaiting approval' : undefined} onClick={() => setModal('plan')}>
+            {data.newPlan.needsApproval ? 'Request new fee plan' : 'Create fee plan'}
+          </button>
+        )}
       </div>
 
       <Card title="Installments" bodyClass="p-0">
@@ -169,7 +177,7 @@ export default function StudentAccount({ studentId }: { studentId: string }) {
       {(data.discounts.length > 0 || data.refunds.length > 0 || data.adjustments?.length > 0) && (
         <Card title="Discounts, adjustments & refunds" bodyClass="p-0">
           <ul className="divide-y divide-slate-100">
-            {data.adjustments?.map((x: any) => <li key={x.id} className="flex justify-between px-5 py-3 text-sm"><span>{x.kind === 'WAIVER' ? 'Waiver' : `Custom plan (${(x.schedule ?? []).length} installments)`} — {x.reason}</span><span className="flex items-center gap-2">{inr(x.amount)} <Badge status={x.status === 'APPLIED' ? 'APPROVED' : x.status}>{label(x.status)}</Badge></span></li>)}
+            {data.adjustments?.map((x: any) => <li key={x.id} className="flex justify-between px-5 py-3 text-sm"><span>{x.kind === 'WAIVER' ? 'Waiver' : x.kind === 'REBILL' ? `New plan for a course billed before (${x.newPlan?.installments ?? ''} installments)` : `Custom plan (${(x.schedule ?? []).length} installments)`} — {x.reason}</span><span className="flex items-center gap-2">{inr(x.amount)} <Badge status={x.status === 'APPLIED' ? 'APPROVED' : x.status}>{label(x.status)}</Badge></span></li>)}
             {data.discounts.map((x: any) => <li key={x.id} className="flex justify-between px-5 py-3 text-sm"><span>{label(x.kind)} {x.kind === 'PERCENT' && `${Number(x.value)}%`} — {x.reason}</span><span className="flex items-center gap-2">{inr(x.amount)} <Badge status={x.status === 'APPLIED' ? 'APPROVED' : x.status} >{label(x.status)}</Badge></span></li>)}
             {data.refunds.map((x: any) => <li key={x.id} className="flex justify-between px-5 py-3 text-sm"><span>Refund — {x.reason}{x.reference && ` (ref ${x.reference})`}</span><span className="flex items-center gap-2">{inr(x.amount)} <Badge status={x.status} />{x.status === 'APPROVED' && can('finance:manage') && <button className="btn-secondary btn-sm" onClick={() => setPayRefund(x)}>Mark paid</button>}</span></li>)}
           </ul>
@@ -204,10 +212,19 @@ export default function StudentAccount({ studentId }: { studentId: string }) {
           <Textarea label="Reason (as per refund policy)" required value={ref.reason} onChange={(e) => setRef({ ...ref, reason: e.target.value })} />
         </div>
       </Modal>
-      <Modal open={modal === 'plan'} onClose={() => setModal('')} title="Create fee plan" size="sm" footer={<button className="btn-primary" disabled={planM.isPending} onClick={() => planM.mutate(undefined)}>Create</button>}>
-        <Select label="Installments" value={plan} onChange={(e) => setPlan(e.target.value)} options={[1, 2, 3, 4, 6, 12].map((n) => ({ value: String(n), label: String(n) }))} />
+      <Modal open={modal === 'plan'} onClose={() => setModal('')} title={data.newPlan?.needsApproval ? 'Request new fee plan' : 'Create fee plan'} size={data.newPlan?.needsApproval ? 'md' : 'sm'}
+        footer={<button className="btn-primary" disabled={planM.isPending || (data.newPlan?.needsApproval && planReason.trim().length < 5)} onClick={() => planM.mutate(undefined)}>{data.newPlan?.needsApproval ? 'Submit for approval' : 'Create'}</button>}>
+        <div className="space-y-4">
+          {data.newPlan?.needsApproval && (
+            <p data-testid="rebill-notice" className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+              This student was already billed for this course on an earlier plan. A second plan is created only after Finance Manager and Management approval; nothing is billed until then. Settle or waive the earlier plan's unpaid balance separately.
+            </p>
+          )}
+          <Select label="Installments" value={plan} onChange={(e) => setPlan(e.target.value)} options={[1, 2, 3, 4, 6, 12].map((n) => ({ value: String(n), label: String(n) }))} />
+          {data.newPlan?.needsApproval && <Textarea label="Reason" required value={planReason} onChange={(e) => setPlanReason(e.target.value)} hint="At least 5 characters. Shown to the approvers." />}
+        </div>
       </Modal>
-      <Confirm open={!!cancel} onClose={() => setCancel(null)} title={`Cancel receipt ${cancel?.receiptNumber ?? ''}`} message="Cancellation needs Finance Manager approval. The receipt is retained and marked cancelled; a reversing ledger entry is posted." tone="danger" confirmLabel="Request cancellation" requireReason busy={cancelM.isPending} onConfirm={(r) => cancelM.mutate(r)} />
+      <Confirm open={!!cancel} onClose={() => setCancel(null)} title={`Cancel receipt ${cancel?.receiptNumber ?? ''}`} message="Cancellation needs Finance Manager approval, and Management for larger receipts. The receipt is retained and marked cancelled; a reversing ledger entry is posted." tone="danger" confirmLabel="Request cancellation" requireReason busy={cancelM.isPending} onConfirm={(r) => cancelM.mutate(r)} />
       <Confirm open={!!payRefund} onClose={() => setPayRefund(null)} title="Mark refund as paid" requireReason reasonLabel="Payment reference (UTR / cheque no.)" busy={payRefM.isPending} onConfirm={(r) => payRefM.mutate(r)} />
     </div>
   );

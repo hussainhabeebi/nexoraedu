@@ -17,6 +17,12 @@
  *     and Finance re-requests).
  *  A5 One pending adjustment per fee plan (service check + partial unique index).
  *  A6 Old values are kept: `before` snapshot on the adjustment, audit log in the same transaction, student history.
+ *  A7 (decision 2026-11-06) A custom plan forgives nothing, so the Management threshold does not apply to it: it is
+ *     decided by the Finance Manager. Waivers (money forgiven) go to Management at or above the threshold.
+ *  A8 (decision 2026-11-06, B2) REBILL: a new fee plan for a course the student was already billed for (e.g. returning
+ *     to it after a course change) is created only through this approval, at the normal levels on the plan amount.
+ *     Re-checked at approval: the enrollment is still current, no plan was created for it meanwhile, and the course
+ *     fee is unchanged (otherwise refused, nothing changes).
  */
 import type { Prisma } from '@prisma/client';
 import { badRequest, conflict, notFound } from '../lib/http';
@@ -25,7 +31,7 @@ import { getSettings } from '../lib/settings';
 import { money } from '../lib/util';
 import { endOfDayUtc, isoDate, parseIsoDate, toCalendarDate } from '../lib/caldate';
 import { createApproval } from './approvals';
-import { ledger, lockStudentAccount, openInstallment } from './finance';
+import { courseFee, createFeePlan, ledger, lockStudentAccount, openInstallment } from './finance';
 
 type Tx = Prisma.TransactionClient;
 export type ScheduleRow = { dueDate: string; amount: number };
@@ -83,9 +89,56 @@ export async function requestFeeAdjustment(
     title: `${what} — ${plan.student.fullName}: ${p.reason}`,
     payload: { kind: p.kind, amount, reason: p.reason, ...(schedule && { schedule: schedule.map((r) => `${r.dueDate}: ${r.amount.toFixed(2)}`).join('; ') }) },
     amount, requestedById: p.requestedById,
+    // A7: a custom plan forgives nothing, so no Management threshold applies to it.
+    levelAmount: p.kind === 'RESCHEDULE' ? 0 : amount,
   });
   const updated = await tx.feeAdjustment.update({ where: { id: adj.id }, data: { approvalRequestId: approval.id } });
   return { adjustment: updated, approval };
+}
+
+export type NewPlan = { enrollmentId: string; courseId: string; installments: number; startDate?: string };
+
+/** Earlier plans for the same course outside the current enrollment chain (B2: the course was billed before). */
+export async function earlierPlansForCourse(tx: Tx, studentId: string, courseId: string, chain: string[]) {
+  return tx.feePlan.findMany({ where: { studentId, courseId, enrollmentId: { notIn: chain } }, orderBy: { createdAt: 'asc' } });
+}
+
+/** A8 / B2: request a new plan for a course the student was billed for before. Nothing is billed until approved. */
+export async function requestRebill(tx: Tx, p: { studentId: string; plan: NewPlan; earlierPlanId: string; reason: string; requestedById: string }) {
+  await lockStudentAccount(tx, p.studentId);
+  const pending = await tx.feeAdjustment.findFirst({ where: { studentId: p.studentId, kind: 'REBILL', status: 'PENDING_APPROVAL' }, select: { id: true } });
+  if (pending) throw conflict('A new fee plan for this student is already awaiting approval.', { adjustmentId: pending.id });
+  const [st, course, fee] = await Promise.all([
+    tx.student.findUniqueOrThrow({ where: { id: p.studentId }, select: { fullName: true } }),
+    tx.course.findUniqueOrThrow({ where: { id: p.plan.courseId }, select: { name: true } }),
+    courseFee(tx, p.plan.courseId),
+  ]);
+  const amount = money(fee.gross);
+  const adj = await tx.feeAdjustment.create({ data: { studentId: p.studentId, feePlanId: p.earlierPlanId, kind: 'REBILL', amount, reason: p.reason, newPlan: p.plan as any, requestedById: p.requestedById } });
+  const approval = await createApproval(tx, {
+    type: 'FEE_ADJUSTMENT', entityType: 'fee_adjustment', entityId: adj.id,
+    title: `New fee plan ${amount.toFixed(2)} for ${course.name} (billed before) — ${st.fullName}: ${p.reason}`,
+    payload: { kind: 'REBILL', amount, course: course.name, installments: p.plan.installments, reason: p.reason },
+    amount, requestedById: p.requestedById,
+  });
+  const updated = await tx.feeAdjustment.update({ where: { id: adj.id }, data: { approvalRequestId: approval.id } });
+  return { adjustment: updated, approval };
+}
+
+async function applyRebill(tx: Tx, a: { id: string; studentId: string; feePlanId: string; amount: unknown; reason: string; newPlan: unknown; approvalRequestId: string | null }, actorId: string) {
+  const np = a.newPlan as NewPlan;
+  const cur = await tx.enrollment.findFirst({ where: { id: np.enrollmentId, studentId: a.studentId, status: { in: ['ACTIVE', 'ON_HOLD'] } } });
+  if (!cur || cur.courseId !== np.courseId) throw conflict('The enrollment this plan was requested for is no longer current. Nothing was changed — reject this request.');
+  const chain = await feeEnrollmentChain(tx, cur.id);
+  if (await tx.feePlan.count({ where: { studentId: a.studentId, enrollmentId: { in: chain } } })) throw conflict('A fee plan already exists for this enrollment. Nothing was changed — reject this request.');
+  const fee = await courseFee(tx, np.courseId);
+  if (P(fee.gross) !== P(a.amount)) throw conflict(`The course fee changed since the request (now ${money(fee.gross).toFixed(2)}). Nothing was changed — reject this request and submit a new one.`);
+  const earlier = await tx.feePlan.findUniqueOrThrow({ where: { id: a.feePlanId }, include: { installments: true } });
+  const before = { earlierPlanId: earlier.id, earlierPlanUnpaid: earlier.installments.filter((i) => ['DUE', 'PARTIAL'].includes(i.status)).reduce((s, i) => s + P(i.amount) - P(i.paidAmount), 0) / 100 };
+  const plan = await createFeePlan(tx, { studentId: a.studentId, courseId: np.courseId, installments: np.installments, startDate: np.startDate?.includes('T') ? new Date(np.startDate) : np.startDate, userId: actorId, enrollmentId: cur.id });
+  await tx.feeAdjustment.update({ where: { id: a.id }, data: { status: 'APPLIED', appliedAt: new Date(), before, createdFeePlanId: plan.id } });
+  await tx.studentHistory.create({ data: { studentId: a.studentId, type: 'FEE', message: `New fee plan of ${Number(a.amount).toFixed(2)} created after approval (course billed before) — ${a.reason}`, userId: actorId } });
+  await tx.auditLog.create({ data: { userId: actorId, action: 'FEE_ADJUSTMENT_REBILL', entity: 'fee_adjustment', entityId: a.id, oldValues: before as any, newValues: { status: 'APPLIED', createdFeePlanId: plan.id, amount: Number(a.amount), approvalRequestId: a.approvalRequestId } as any } });
 }
 
 /** Executed by the FEE_ADJUSTMENT approval handler (inside the approval transaction). */
@@ -94,6 +147,7 @@ export async function applyFeeAdjustment(tx: Tx, adjustmentId: string, actorId: 
   await lockStudentAccount(tx, a0.studentId);
   const a = await tx.feeAdjustment.findUniqueOrThrow({ where: { id: adjustmentId } });
   if (a.status !== 'PENDING_APPROVAL') throw conflict(`This adjustment is already ${a.status.toLowerCase().replace('_', ' ')}.`);
+  if (a.kind === 'REBILL') return applyRebill(tx, a, actorId);
   const plan = await tx.feePlan.findUniqueOrThrow({ where: { id: a.feePlanId } });
   const { insts, openPaise } = await openOf(tx, plan.id);
   const before = insts.map((i) => ({ id: i.id, seq: i.seq, amount: Number(i.amount), paidAmount: Number(i.paidAmount), status: i.status, dueDate: i.dueDate.toISOString() }));

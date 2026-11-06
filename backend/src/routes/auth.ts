@@ -35,11 +35,30 @@ const r = Router();
 const RATE_WINDOW_MS = 15 * 60 * 1000;
 const RATE_LIMITED = { error: { code: 'RATE_LIMIT', message: 'Too many attempts. Please wait a few minutes and try again.' } };
 
-/** Password-guessing protection for login, MFA and password reset: per IP (unchanged policy). */
+/** Per-IP limit (password reset: AUTH_RATE_LIMIT, default 30 per 15 min, unchanged). */
 export function makeAuthLimiter(limit: number) {
   return rateLimit({ windowMs: RATE_WINDOW_MS, limit, standardHeaders: true, legacyHeaders: false, message: RATE_LIMITED });
 }
 const limiter = makeAuthLimiter(Number(process.env.AUTH_RATE_LIMIT || 30));
+
+/**
+ * Sign-in limits for a whole office behind one connection (a 9 am rush of 15+ staff exhausted a 30-per-IP limit,
+ * because each sign-in is a password step plus an MFA step):
+ *  - per IP + username (AUTH_ACCOUNT_RATE_LIMIT, default 10 / 15 min): guessing one account stays tightly limited,
+ *    on top of the existing account lockout after repeated wrong passwords;
+ *  - per IP for all sign-in steps together (AUTH_IP_RATE_LIMIT, default 100 / 15 min): still stops one connection
+ *    trying many usernames (credential stuffing), with room for a full office.
+ * MFA codes are additionally limited per challenge (MFA_MAX_ATTEMPTS).
+ */
+export function makeSignInLimiters(o: { perAccount: number; perIp: number }) {
+  const perIp = rateLimit({ windowMs: RATE_WINDOW_MS, limit: o.perIp, standardHeaders: true, legacyHeaders: false, message: RATE_LIMITED, keyGenerator: (req) => `signin-ip:${ipKeyGenerator(req.ip ?? '')}` });
+  const perAccount = rateLimit({
+    windowMs: RATE_WINDOW_MS, limit: o.perAccount, standardHeaders: true, legacyHeaders: false, message: RATE_LIMITED,
+    keyGenerator: (req) => `signin-acct:${ipKeyGenerator(req.ip ?? '')}:${String(req.body?.identifier ?? '').trim().toLowerCase().slice(0, 200)}`,
+  });
+  return { login: [perIp, perAccount], mfa: [perIp] };
+}
+const signIn = makeSignInLimiters({ perAccount: Number(process.env.AUTH_ACCOUNT_RATE_LIMIT || 10), perIp: Number(process.env.AUTH_IP_RATE_LIMIT || 100) });
 
 /**
  * P1: session refresh has its OWN limits and never consumes the login allowance. A refresh needs the HttpOnly
@@ -111,7 +130,7 @@ async function registerFailure(req: Request, user: { id: string; name: string; e
 }
 
 // ── Password step ──
-r.post('/login', limiter, ah(async (req, res) => {
+r.post('/login', ...signIn.login, ah(async (req, res) => {
   const { identifier, password, portal } = z.object({ identifier: z.string().min(1).max(200), password: z.string().min(1).max(200), portal: z.enum(['staff', 'student']).optional() }).parse(req.body);
   const id = identifier.trim().toLowerCase();
   const user = await prisma.user.findFirst({ where: { OR: [{ email: id }, { username: id }] }, include: { roles: { include: { role: true } }, mfaFactor: true } });
@@ -148,7 +167,7 @@ r.post('/login', limiter, ah(async (req, res) => {
 }));
 
 // ── Second factor ──
-r.post('/mfa/verify', limiter, ah(async (req, res) => {
+r.post('/mfa/verify', ...signIn.mfa, ah(async (req, res) => {
   const d = z.object({ mfaToken: z.string().min(10), code: z.string().trim().optional(), recoveryCode: z.string().trim().optional() }).refine((x) => x.code || x.recoveryCode, 'Enter a code').parse(req.body);
   const ch = await prisma.mfaChallenge.findUnique({ where: { tokenHash: sha256(d.mfaToken) } });
   if (!ch || ch.usedAt || ch.expiresAt < new Date() || ch.attempts >= MFA_MAX_ATTEMPTS) throw new HttpError(401, 'Your sign-in attempt expired. Please sign in again.', 'MFA_CHALLENGE_EXPIRED');

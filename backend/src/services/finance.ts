@@ -54,14 +54,19 @@ export function planStartDate(input: Date | string | undefined, timeZone: string
   return toCalendarDate(input ?? new Date(), timeZone);
 }
 
-/** FIN-02/03: build a fee plan from the course fee structure, split into installments, invoice each. */
-export async function createFeePlan(tx: Tx, p: { studentId: string; courseId: string; installments?: number; startDate?: Date | string; userId?: string; enrollmentId?: string | null }) {
-  const comps = await tx.feeComponent.findMany({ where: { courseId: p.courseId, isActive: true, effectiveFrom: { lte: new Date() } } });
+/** FIN-01: the course's current fee components (with tax) and their gross total, as a new plan would bill them. */
+export async function courseFee(tx: Tx, courseId: string) {
+  const comps = await tx.feeComponent.findMany({ where: { courseId, isActive: true, effectiveFrom: { lte: new Date() } } });
   const components = comps.map((c) => {
     const tax = money((Number(c.amount) * Number(c.taxPercent)) / 100);
     return { name: c.name, amount: Number(c.amount), tax, total: money(Number(c.amount) + tax) };
   });
-  const gross = fromPaise(components.reduce((s, c) => s + toPaise(c.total), 0));
+  return { components, gross: fromPaise(components.reduce((s, c) => s + toPaise(c.total), 0)) };
+}
+
+/** FIN-02/03: build a fee plan from the course fee structure, split into installments, invoice each. */
+export async function createFeePlan(tx: Tx, p: { studentId: string; courseId: string; installments?: number; startDate?: Date | string; userId?: string; enrollmentId?: string | null }) {
+  const { components, gross } = await courseFee(tx, p.courseId);
   const course = await tx.course.findUniqueOrThrow({ where: { id: p.courseId } });
   const s = await getSettings();
   const tz = s.academy.timeZone;

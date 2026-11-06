@@ -115,6 +115,10 @@ describe('finance', () => {
     expect(req1.status).toBe(200);
     const finmgr = await sessionFor('finmgr');
     await request(app).post(`/api/v1/approvals/${req1.body.approval.id}/act`).set(as(finmgr)).send({ action: 'APPROVE' });
+    // SRS 22.6 (decision 2026-11-06): a receipt of 10,000 or more also needs Management.
+    expect(Number(p.amount)).toBe(10000); // at the threshold: level 2 applies
+    expect((await prisma.payment.findUniqueOrThrow({ where: { id: p.id } })).status).toBe('CANCEL_REQUESTED');
+    await request(app).post(`/api/v1/approvals/${req1.body.approval.id}/act`).set(as(await sessionFor('director'))).send({ action: 'APPROVE' });
     const types = (await prisma.ledgerEntry.findMany({ where: { studentId } })).map((e) => e.type);
     expect(types).toContain('REVERSAL');
     expect((await prisma.payment.findUniqueOrThrow({ where: { id: p.id } })).status).toBe('CANCELLED');

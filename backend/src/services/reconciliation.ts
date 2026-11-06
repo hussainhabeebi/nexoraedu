@@ -28,7 +28,8 @@
  *                            (fee adjustment) follow their own approved dates: each must be end of day in the zone.
  *  R13 ADJUSTMENT_LEDGER     APPLIED waiver ⇔ exactly one WAIVER credit = amount; per plan Σ applied waivers =
  *                            fee_plans.waived; a custom plan (RESCHEDULE) and non-applied adjustments post nothing;
- *                            an applied custom plan created installments adding up to its amount.
+ *                            an applied custom plan created installments adding up to its amount; an applied REBILL
+ *                            links the plan it created (same student, gross = approved amount).
  *  R14 CLOSED_ENROLLMENT_BALANCE  unpaid installments on a plan whose enrollment has ended without continuing in the
  *                            same course: WARNING when CANCELLED or moved to another course (a fee adjustment or new
  *                            decision is needed); INFO when WITHDRAWN / TERMINATED (refund/fee policy pending).
@@ -68,7 +69,7 @@ export async function reconcile(opts: { studentId?: string } = {}) {
         tx.discount.findMany({ where: sw, select: { id: true, studentId: true, feePlanId: true, amount: true, status: true } }),
         tx.refund.findMany({ where: sw, select: { id: true, studentId: true, amount: true, status: true } }),
         tx.ledgerEntry.findMany({ where: sw, select: { id: true, studentId: true, type: true, debit: true, credit: true, refType: true, refId: true } }),
-        tx.feeAdjustment.findMany({ where: sw, select: { id: true, studentId: true, feePlanId: true, kind: true, amount: true, status: true } }),
+        tx.feeAdjustment.findMany({ where: sw, select: { id: true, studentId: true, feePlanId: true, kind: true, amount: true, status: true, createdFeePlanId: true } }),
         tx.enrollment.findMany({ where: sw, select: { id: true, studentId: true, courseId: true, status: true, previousEnrollmentId: true } }),
       ]);
       const issues: Issue[] = [];
@@ -172,6 +173,12 @@ export async function reconcile(opts: { studentId?: string } = {}) {
         const want = applied && isWaiver;
         if (want ? ent.length !== 1 || ent[0].type !== 'WAIVER' || P(ent[0].credit) !== P(a.amount) : ent.length !== 0)
           add({ rule: 'R13_ADJUSTMENT_LEDGER', severity: 'ERROR', studentId: a.studentId, entity: 'fee_adjustment', entityId: a.id, expected: want ? `1 WAIVER credit of ${R(P(a.amount))}` : '0 entries', actual: `${ent.length}`, message: `Fee adjustment (${a.kind}, ${a.status}) ledger entries do not match.` });
+        if (a.kind === 'REBILL' && applied) {
+          const np = a.createdFeePlanId ? planById.get(a.createdFeePlanId) : undefined;
+          if (!np || np.studentId !== a.studentId || P(np.grossAmount) !== P(a.amount))
+            add({ rule: 'R13_ADJUSTMENT_LEDGER', severity: 'ERROR', studentId: a.studentId, entity: 'fee_adjustment', entityId: a.id, expected: `plan of ${R(P(a.amount))}`, actual: np ? R(P(np.grossAmount)) : 'none', message: 'Applied re-billing does not link the plan it created.' });
+          continue;
+        }
         const created = instByAdj.get(a.id) ?? [];
         if (applied && !isWaiver && created.length === 0)
           add({ rule: 'R13_ADJUSTMENT_LEDGER', severity: 'ERROR', studentId: a.studentId, entity: 'fee_adjustment', entityId: a.id, message: 'Applied custom plan created no installments.' });

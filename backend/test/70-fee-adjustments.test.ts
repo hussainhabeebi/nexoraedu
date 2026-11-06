@@ -192,7 +192,7 @@ describe('Custom installment plans (FIN-03 via 22.6)', () => {
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     expect(Number(r.body.adjustment.amount)).toBe(open);
     expect(await insts(planId)).toHaveLength(2); // nothing before approval
-    await approveAll(r.body.approval.id); // amount above the threshold → Finance Manager, then Management
+    await approveAll(r.body.approval.id); // custom plan: Finance Manager only (nothing forgiven, decision 2026-11-06)
 
     const all = await insts(planId);
     expect(all).toHaveLength(5);
@@ -393,5 +393,114 @@ describe('Discount plan choice (students with several plans)', () => {
     expect((await discount({ studentId: st.id, feePlanId: np.body.id, value: newOpen + 1 })).status).toBe(400);
     expect(await prisma.auditLog.count({ where: { entity: 'discount', entityId: chosen.body.discount.id, action: 'CREATE' } })).toBe(1);
     await clean(st.id);
+  });
+});
+
+describe('Approval policy decisions (2026-11-06)', () => {
+  const levelsOf = async (approvalId: string) => ((await prisma.approvalRequest.findUniqueOrThrow({ where: { id: approvalId } })).levels as any[]).map((l) => l.role);
+
+  it('a custom plan forgives nothing: Finance Manager only, even far above the ₹10,000 threshold; waivers keep Management', async () => {
+    const { st, planId } = await studentWithPlan(2);
+    const open = (await insts(planId)).reduce((s, i) => s + Number(i.amount) - Number(i.paidAmount), 0);
+    expect(open).toBeGreaterThan(10000);
+    const r = await adjust({ kind: 'RESCHEDULE', studentId: st.id, feePlanId: planId, schedule: [{ dueDate: isoIn(20), amount: open }], reason: 'One payment later (synthetic)' });
+    expect(r.status).toBe(201);
+    expect(Number(r.body.approval.amount)).toBe(open); // the real total is still shown to the approver
+    expect(await levelsOf(r.body.approval.id)).toEqual(['finance_manager']);
+    expect((await approve(r.body.approval.id, finmgr)).status).toBe('APPROVED');
+    const w = await studentWithPlan(1);
+    const wr = await adjust({ kind: 'WAIVER', studentId: w.st.id, feePlanId: w.planId, amount: 10000, reason: 'At threshold (synthetic)' });
+    expect(await levelsOf(wr.body.approval.id)).toEqual(['finance_manager', 'management']); // ≥ 10,000
+  });
+
+  it('receipt cancellation: Finance Manager below ₹10,000; Finance Manager then Management at or above it', async () => {
+    const { st } = await studentWithPlan(1);
+    const small = await pay(st.id, 9999);
+    const big = await pay(st.id, 12000);
+    const cs = await request(app).post(`/api/v1/finance/payments/${small.body.id}/cancel-request`).set(as(accounts)).send({ reason: 'Wrong amount (synthetic)' });
+    expect(await levelsOf(cs.body.approval.id)).toEqual(['finance_manager']);
+    const cb = await request(app).post(`/api/v1/finance/payments/${big.body.id}/cancel-request`).set(as(accounts)).send({ reason: 'Bounced cheque (synthetic)' });
+    expect(await levelsOf(cb.body.approval.id)).toEqual(['finance_manager', 'management']);
+    expect((await approve(cb.body.approval.id, finmgr)).status).toBe('PENDING');
+    expect((await prisma.payment.findUniqueOrThrow({ where: { id: big.body.id } })).status).toBe('CANCEL_REQUESTED');
+    expect((await approve(cb.body.approval.id, director)).status).toBe('APPROVED');
+    expect((await prisma.payment.findUniqueOrThrow({ where: { id: big.body.id } })).status).toBe('CANCELLED');
+    await clean(st.id);
+  });
+
+  async function returningStudent() {
+    const { st, planId } = await studentWithPlan(2); // Full Stack, billed
+    for (const to of [dmBatch, fsdBatches[1]]) { // → Digital Marketing → back to Full Stack
+      const t = await request(app).post(`/api/v1/students/${st.id}/transfer`).set(as(office)).send({ toBatchId: to, reason: 'Course change (synthetic)' });
+      await approve(t.body.approval.id, acad);
+    }
+    return { st, oldPlanId: planId };
+  }
+  const newPlan = (id: string, body: any = {}) => request(app).post(`/api/v1/finance/students/${id}/fee-plan`).set(as(finmgr)).send({ installments: 2, ...body });
+
+  it('B2: returning to a course already billed — a second plan needs approval; nothing is billed until approved', async () => {
+    const { st, oldPlanId } = await returningStudent();
+    const plans0 = await prisma.feePlan.count({ where: { studentId: st.id } });
+    const ledger0 = await prisma.ledgerEntry.count({ where: { studentId: st.id } });
+    const acct = await request(app).get(`/api/v1/finance/students/${st.id}/account`).set(as(accounts));
+    expect(acct.body.newPlan).toEqual({ allowed: true, needsApproval: true, pendingAdjustmentId: null });
+    const noReason = await newPlan(st.id);
+    expect(noReason.status).toBe(400);
+    expect(noReason.body.error.details).toEqual({ needsApproval: true });
+    const r = await newPlan(st.id, { reason: 'Re-joined Full Stack after leaving it (synthetic)' });
+    expect(r.status, JSON.stringify(r.body)).toBe(202);
+    expect(r.body.adjustment).toMatchObject({ kind: 'REBILL', status: 'PENDING_APPROVAL', feePlanId: oldPlanId });
+    expect(Number(r.body.adjustment.amount)).toBe(60100);
+    expect(await levelsOf(r.body.approval.id)).toEqual(['finance_manager', 'management']); // plan amount ≥ 10,000
+    expect(await prisma.feePlan.count({ where: { studentId: st.id } })).toBe(plans0);
+    expect(await prisma.ledgerEntry.count({ where: { studentId: st.id } })).toBe(ledger0);
+    expect((await newPlan(st.id, { reason: 'Second request (synthetic)' })).status).toBe(409); // one pending at a time
+    expect((await request(app).get(`/api/v1/finance/students/${st.id}/account`).set(as(accounts))).body.newPlan.pendingAdjustmentId).toBe(r.body.adjustment.id);
+    // The requesting Finance Manager cannot approve; a second Finance Manager, then Management.
+    expect((await act(r.body.approval.id, finmgr)).status).toBe(403);
+    expect((await approve(r.body.approval.id, finmgr2)).status).toBe('PENDING');
+    expect((await approve(r.body.approval.id, director)).status).toBe('APPROVED');
+    const adj = await prisma.feeAdjustment.findUniqueOrThrow({ where: { id: r.body.adjustment.id } });
+    const created = await prisma.feePlan.findUniqueOrThrow({ where: { id: adj.createdFeePlanId! } });
+    const cur = await prisma.enrollment.findFirstOrThrow({ where: { studentId: st.id, status: 'ACTIVE' } });
+    expect(adj.status).toBe('APPLIED');
+    expect(created).toMatchObject({ studentId: st.id, enrollmentId: cur.id });
+    expect(Number(created.grossAmount)).toBe(60100);
+    expect(await prisma.ledgerEntry.count({ where: { refType: 'fee_plan', refId: created.id, type: 'FEE' } })).toBe(1);
+    expect(await prisma.auditLog.count({ where: { action: 'FEE_ADJUSTMENT_REBILL', entityId: adj.id } })).toBe(1);
+    expect((await newPlan(st.id, { reason: 'Third (synthetic)' })).status).toBe(400); // plan now exists for this enrollment
+    expect((await reconcile({ studentId: st.id })).issues.filter((i) => i.severity === 'ERROR')).toEqual([]);
+  });
+
+  it('B2: re-checked at approval — refused if the course fee changed or the enrollment moved; rejection changes nothing', async () => {
+    const { st } = await returningStudent();
+    const r = await newPlan(st.id, { reason: 'Re-joined (synthetic)' });
+    expect(r.status).toBe(202);
+    const comp = await prisma.feeComponent.findFirstOrThrow({ where: { course: { code: 'FSD' }, isActive: true } });
+    await prisma.feeComponent.update({ where: { id: comp.id }, data: { amount: { increment: 1 } } });
+    try {
+      expect((await approve(r.body.approval.id, finmgr2)).status).toBe('PENDING');
+      const a = await act(r.body.approval.id, director);
+      expect(a.status).toBe(409);
+      expect(a.body.error.message).toMatch(/course fee changed/);
+    } finally {
+      await prisma.feeComponent.update({ where: { id: comp.id }, data: { amount: { decrement: 1 } } });
+    }
+    // Enrollment moves to another course before the final approval.
+    const t = await request(app).post(`/api/v1/students/${st.id}/transfer`).set(as(office)).send({ toBatchId: dmBatch, reason: 'Changed again (synthetic)' });
+    await approve(t.body.approval.id, acad);
+    const a2 = await act(r.body.approval.id, director);
+    expect(a2.status).toBe(409);
+    expect(a2.body.error.message).toMatch(/no longer current/);
+    expect((await act(r.body.approval.id, director, 'REJECT', 'Obsolete')).status).toBe(200);
+    expect((await prisma.feeAdjustment.findUniqueOrThrow({ where: { id: r.body.adjustment.id } })).status).toBe('REJECTED');
+    expect(await prisma.feePlan.count({ where: { studentId: st.id, courseId: comp.courseId } })).toBe(1); // only the original
+  });
+
+  it('a first plan for a course never billed before is still created directly (unchanged)', async () => {
+    const st = await makeStudent({ batchId: fsdBatches[0] });
+    const r = await newPlan(st.id);
+    expect(r.status).toBe(201);
+    expect((await request(app).get(`/api/v1/finance/students/${st.id}/account`).set(as(accounts))).body.newPlan).toEqual({ allowed: false, needsApproval: false, pendingAdjustmentId: null });
   });
 });

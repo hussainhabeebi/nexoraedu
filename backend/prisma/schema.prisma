@@ -720,7 +720,9 @@ model FeePlan {
   /// Σ applied fee-adjustment waivers (SRS 22.6), kept like `discount` for display and reconciliation
   waived       Decimal         @default(0) @db.Decimal(12, 2)
   installments Installment[]
-  adjustments  FeeAdjustment[]
+  adjustments  FeeAdjustment[] @relation("AdjustedPlan")
+  /// Set when this plan was created by an approved REBILL adjustment (B2: course billed again)
+  rebilledBy   FeeAdjustment[] @relation("RebilledPlan")
   createdAt    DateTime        @default(now())
 
   @@map("fee_plans")
@@ -832,14 +834,19 @@ model FeeAdjustment {
   studentId         String
   student           Student       @relation(fields: [studentId], references: [id], onDelete: Restrict)
   feePlanId         String
-  feePlan           FeePlan       @relation(fields: [feePlanId], references: [id], onDelete: Restrict)
-  kind              String // WAIVER, RESCHEDULE
+  feePlan           FeePlan       @relation("AdjustedPlan", fields: [feePlanId], references: [id], onDelete: Restrict)
+  kind              String // WAIVER, RESCHEDULE, REBILL (new plan for a course the student was already billed for)
   amount            Decimal       @db.Decimal(12, 2)
   reason            String
   /// RESCHEDULE: [{ dueDate: "YYYY-MM-DD", amount }]
   schedule          Json?
   /// Open installments as they were when the adjustment was applied (old values kept for audit)
   before            Json?
+  /// REBILL: the plan to create for the current enrollment { enrollmentId, courseId, installments, startDate? }
+  newPlan           Json?
+  /// REBILL, once applied: the plan that was created
+  createdFeePlanId  String?
+  createdFeePlan    FeePlan?      @relation("RebilledPlan", fields: [createdFeePlanId], references: [id], onDelete: Restrict)
   status            String        @default("PENDING_APPROVAL") // PENDING_APPROVAL, APPLIED, REJECTED
   requestedById     String
   approvalRequestId String?

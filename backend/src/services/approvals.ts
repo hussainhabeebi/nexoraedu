@@ -63,13 +63,19 @@ export async function assertWorkflowLevels(db: Tx | typeof prisma, levels: Level
 
 export async function createApproval(
   tx: Tx,
-  p: { type: string; entityType: string; entityId: string; title: string; payload?: any; amount?: number; requestedById: string },
+  p: {
+    type: string; entityType: string; entityId: string; title: string; payload?: any; amount?: number; requestedById: string;
+    /** Amount compared with the workflow's level thresholds when it differs from the displayed amount (e.g. a
+     *  custom installment plan shows the rescheduled total but forgives nothing, so no threshold applies). */
+    levelAmount?: number;
+  },
 ) {
   if (!handlers.has(p.type) || !(p.type in APPROVAL_TYPES)) throw new ApprovalNotConfigured(p.type);
   const wf = await tx.approvalWorkflow.findUnique({ where: { type: p.type } });
   if (!wf || !wf.isActive) throw new ApprovalNotConfigured(p.type);
   const all = (Array.isArray(wf.levels) ? wf.levels : []) as Level[];
-  const levels = all.filter((l) => !l.minAmount || (p.amount ?? 0) >= l.minAmount).sort((a, b) => a.level - b.level);
+  const decisive = p.levelAmount ?? p.amount ?? 0;
+  const levels = all.filter((l) => !l.minAmount || decisive >= l.minAmount).sort((a, b) => a.level - b.level);
   if (!levels.length) throw new ApprovalNotConfigured(p.type);
   const pending = await tx.approvalRequest.findFirst({ where: { type: p.type, entityId: p.entityId, status: 'PENDING' }, select: { id: true } });
   if (pending) throw new HttpError(409, 'An approval request for this record is already pending.', 'APPROVAL_PENDING', { approvalId: pending.id });

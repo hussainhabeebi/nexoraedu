@@ -11,8 +11,8 @@ import { money, toCsv } from '../lib/util';
 import { dayDiff, formatDate, toCalendarDate } from '../lib/caldate';
 import { reconcile } from '../services/reconciliation';
 import { createApproval } from '../services/approvals';
-import { ACTIVE_REFUND_STATUSES, assertCancellationKeepsRefundsCovered, createFeePlan, ledger, lockStudentAccount, recordPayment, studentBalance } from '../services/finance';
-import { feeEnrollmentChain, requestFeeAdjustment } from '../services/feeAdjustments';
+import { ACTIVE_REFUND_STATUSES, assertCancellationKeepsRefundsCovered, courseFee, createFeePlan, ledger, lockStudentAccount, recordPayment, studentBalance } from '../services/finance';
+import { earlierPlansForCourse, feeEnrollmentChain, requestFeeAdjustment, requestRebill } from '../services/feeAdjustments';
 import { notifyLater } from '../services/notify';
 
 const r = Router();
@@ -33,12 +33,22 @@ r.get('/students/:id/account', can('finance:read'), ah(async (req, res) => {
   ]);
   let run = 0;
   const ledgerRows = entries.map((e) => ((run = money(run + Number(e.debit) - Number(e.credit))), { ...e, balance: run }));
-  res.json({ student: st, plans, invoices, payments, ledger: ledgerRows, discounts, refunds, adjustments, balance });
+  // Whether a plan can be created for the current enrollment, and whether it needs approval (B2).
+  const cur = await prisma.enrollment.findFirst({ where: { studentId: st.id, courseId: st.courseId, status: { in: ['ACTIVE', 'ON_HOLD'] } } });
+  let newPlan: { allowed: boolean; needsApproval: boolean; pendingAdjustmentId: string | null } = { allowed: false, needsApproval: false, pendingAdjustmentId: null };
+  if (cur) {
+    const chain = await feeEnrollmentChain(prisma as any, cur.id);
+    const has = await prisma.feePlan.count({ where: { studentId: st.id, OR: [{ enrollmentId: { in: chain } }, { enrollmentId: null, courseId: st.courseId }] } });
+    const earlier = has ? [] : await earlierPlansForCourse(prisma as any, st.id, st.courseId, chain);
+    const pending = adjustments.find((a) => a.kind === 'REBILL' && a.status === 'PENDING_APPROVAL');
+    newPlan = { allowed: !has, needsApproval: !has && earlier.length > 0, pendingAdjustmentId: pending?.id ?? null };
+  }
+  res.json({ student: st, plans, invoices, payments, ledger: ledgerRows, discounts, refunds, adjustments, balance, newPlan });
 }));
 
 r.post('/students/:id/fee-plan', can('finance:manage'), ah(async (req, res) => {
   // startDate: a calendar date "YYYY-MM-DD" in the academy time zone (preferred) or an ISO timestamp.
-  const { installments, startDate } = z.object({ installments: z.number().int().min(1).max(24), startDate: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.coerce.date()]).optional() }).parse(req.body);
+  const { installments, startDate, reason } = z.object({ installments: z.number().int().min(1).max(24), startDate: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.coerce.date()]).optional(), reason: z.string().trim().min(5).max(500).optional() }).parse(req.body);
   const st = await prisma.student.findUniqueOrThrow({ where: { id: req.params.id } });
   const enrollment = await prisma.enrollment.findFirst({ where: { studentId: st.id, courseId: st.courseId, status: { in: ['ACTIVE', 'ON_HOLD'] } } });
   if (!enrollment) throw badRequest('The student has no current enrollment in this course.');
@@ -47,6 +57,18 @@ r.post('/students/:id/fee-plan', can('finance:manage'), ah(async (req, res) => {
   const chain = await feeEnrollmentChain(prisma as any, enrollment.id);
   const existing = await prisma.feePlan.count({ where: { studentId: st.id, OR: [{ enrollmentId: { in: chain } }, { enrollmentId: null, courseId: st.courseId }] } });
   if (existing) throw badRequest('A fee plan already exists for this enrollment. Use discounts or adjustments instead.');
+  // B2 (decision 2026-11-06): the student was billed for this course before (e.g. returned to it after a course
+  // change). A second plan for the same course is created only through an approved fee adjustment (REBILL).
+  const earlier = await earlierPlansForCourse(prisma as any, st.id, st.courseId, chain);
+  if (earlier.length && (await courseFee(prisma as any, st.courseId)).gross > 0) {
+    if (!reason) throw badRequest('This student was already billed for this course. Give a reason: the new plan needs approval.', { needsApproval: true });
+    const out = await prisma.$transaction(async (tx) => {
+      const out = await requestRebill(tx, { studentId: st.id, plan: { enrollmentId: enrollment.id, courseId: st.courseId, installments, startDate: startDate instanceof Date ? startDate.toISOString() : startDate }, earlierPlanId: earlier[earlier.length - 1].id, reason, requestedById: req.user!.id });
+      await audit(tx, req, 'CREATE', 'fee_adjustment', out.adjustment.id, null, { kind: 'REBILL', studentId: st.id, installments, startDate, amount: Number(out.adjustment.amount), earlierPlanIds: earlier.map((p) => p.id), approvalId: out.approval.id });
+      return out;
+    });
+    return res.status(202).json({ needsApproval: true, ...out });
+  }
   const plan = await prisma.$transaction(async (tx) => {
     const plan = await createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments, startDate, userId: req.user!.id });
     await audit(tx, req, 'CREATE', 'fee_plan', plan.id, null, { studentId: st.id, installments, startDate });
