@@ -4,12 +4,15 @@ import { Eye, EyeOff } from 'lucide-react';
 import { pendingStep, useAuth } from '@/lib/auth';
 import AuthShell from '@/components/AuthShell';
 import { ErrorBox, Input, Spinner } from '@/components/ui';
+import { rateLimitMessage, refreshRateLimit } from '@/lib/api';
 
 export default function Login({ portal }: { portal: 'staff' | 'student' }) {
   const { login, verifyMfa } = useAuth();
   const [mfa, setMfa] = useState<{ token: string; code: string; recovery: boolean } | null>(null);
   const nav = useNavigate();
   const loc = useLocation() as any;
+  // P2: the session restore on page load was refused as "too many attempts" — say so instead of looking signed out.
+  const limited = refreshRateLimit();
   const [f, setF] = useState({ identifier: '', password: '' });
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -25,7 +28,8 @@ export default function Login({ portal }: { portal: 'staff' | 'student' }) {
         <h2 className="mt-3 max-w-md text-4xl font-bold leading-tight text-white">{student ? 'Your classes, fees, exams and results — in one place.' : 'One platform for admissions, students, finance, academics and exams.'}</h2>
       </>}
     >
-      {loc.state?.reason === 'idle' && <p className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">You were signed out after a period of inactivity.</p>}
+      {limited && <p role="alert" data-testid="rate-limit-notice" className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">{rateLimitMessage(limited.minutes, false)}</p>}
+      {!limited && loc.state?.reason === 'idle' && <p className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">You were signed out after a period of inactivity.</p>}
       <form className="space-y-4" onSubmit={async (e) => {
         e.preventDefault();
         setBusy(true); setErr(null);

@@ -28,6 +28,8 @@ export default defineConfig({
       DATABASE_URL: appUrl,
       TEST_OWNER_DATABASE_URL: owner,
       AUTH_RATE_LIMIT: '100000',
+      REFRESH_RATE_LIMIT: '100000',
+      REFRESH_ANON_RATE_LIMIT: '100000',
       API_RATE_LIMIT: '100000',
       REFRESH_RACE_GRACE_MS: '0',
       JOBS_ENABLED: 'false',

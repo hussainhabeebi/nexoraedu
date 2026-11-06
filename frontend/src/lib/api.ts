@@ -42,12 +42,36 @@ export const onSession = (l: (s: Session | null) => void) => {
   return () => listeners.delete(l);
 };
 
+/**
+ * P2: when the server refuses a session refresh as "too many attempts" (429), remember until when, so the app can
+ * say so instead of silently looking signed out. The refresh cookie is still valid: waiting and reloading works.
+ */
+let refreshBlockedUntil = 0;
+const rateLimitListeners = new Set<(message: string) => void>();
+export function refreshRateLimit(): { minutes: number } | null {
+  const left = refreshBlockedUntil - Date.now();
+  return left > 0 ? { minutes: Math.max(1, Math.ceil(left / 60_000)) } : null;
+}
+export const rateLimitMessage = (minutes: number, signedIn: boolean) =>
+  `Too many attempts from this connection. Please wait about ${minutes} minute${minutes === 1 ? '' : 's'}${signedIn ? ' and try again — you have not been signed out.' : ', then reload this page — you may still be signed in.'}`;
+/** Called with a ready-to-show message when a refresh is rate-limited while the user is working. */
+export const onRefreshRateLimited = (l: (message: string) => void) => {
+  rateLimitListeners.add(l);
+  return () => rateLimitListeners.delete(l);
+};
+
 let refreshing: Promise<boolean> | null = null;
 async function doRefresh(retry = true): Promise<boolean> {
   const r = await fetch(`${API_BASE}/api/v1/auth/refresh`, { method: 'POST', credentials: 'include', headers: { ...CSRF_HEADER } });
   if (r.ok) {
+    refreshBlockedUntil = 0;
     setSession(await r.json());
     return true;
+  }
+  if (r.status === 429) {
+    const seconds = Number(r.headers.get('Retry-After'));
+    refreshBlockedUntil = Date.now() + (Number.isFinite(seconds) && seconds > 0 ? seconds : 60) * 1000;
+    return false;
   }
   // Another tab rotated the cookie at the same moment: the browser now holds the new one, so try once more.
   const body = await r.json().catch(() => ({}));
@@ -83,6 +107,13 @@ export async function api<T = any>(path: string, opts: Opts = {}, retry = true):
   });
   if (res.status === 401 && retry && session && !path.startsWith('/auth/login') && !path.startsWith('/auth/mfa/verify')) {
     if (await refresh()) return api(path, opts, false);
+    const limited = refreshRateLimit();
+    if (limited) {
+      // Rate-limited, not signed out: keep the session (the cookie is still valid) and say how long to wait.
+      const message = rateLimitMessage(limited.minutes, true);
+      rateLimitListeners.forEach((l) => l(message));
+      throw new ApiError(429, message, 'RATE_LIMIT');
+    }
     setSession(null);
   }
   if (opts.raw) {

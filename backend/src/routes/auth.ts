@@ -12,10 +12,10 @@
  *  GET|DELETE /auth/sessions[/:id], POST /auth/sessions/revoke-others
  *  POST /auth/forgot-password, /auth/reset-password (also completes first-time activation links)
  */
-import { Router, type Request, type Response } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { ah, badRequest, HttpError } from '../lib/http';
@@ -32,7 +32,42 @@ import { newTotpSecret, otpauthUrl, verifyTotp } from '../lib/totp';
 import { notify } from '../services/notify';
 
 const r = Router();
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: Number(process.env.AUTH_RATE_LIMIT || 30), standardHeaders: true, legacyHeaders: false, message: { error: { code: 'RATE_LIMIT', message: 'Too many attempts. Please wait a few minutes and try again.' } } });
+const RATE_WINDOW_MS = 15 * 60 * 1000;
+const RATE_LIMITED = { error: { code: 'RATE_LIMIT', message: 'Too many attempts. Please wait a few minutes and try again.' } };
+
+/** Password-guessing protection for login, MFA and password reset: per IP (unchanged policy). */
+export function makeAuthLimiter(limit: number) {
+  return rateLimit({ windowMs: RATE_WINDOW_MS, limit, standardHeaders: true, legacyHeaders: false, message: RATE_LIMITED });
+}
+const limiter = makeAuthLimiter(Number(process.env.AUTH_RATE_LIMIT || 30));
+
+/**
+ * P1: session refresh has its OWN limits and never consumes the login allowance. A refresh needs the HttpOnly
+ * refresh cookie (a 384-bit random token), so it is not a password-guessing route, and it runs on every page load —
+ * counting it per IP signed out whole offices sharing one connection.
+ *  - with a known session: limited per session family (stable across token rotation), so one person's reloads
+ *    never affect a colleague on the same connection;
+ *  - without one (no / unknown cookie, e.g. opening the login page): limited per IP, more generously than login.
+ */
+export function makeRefreshLimiters(o: { perSession: number; anonymous: number }) {
+  const known = (req: Request) => typeof (req as any).refreshFamily === 'string';
+  const identify = async (req: Request, _res: Response, next: NextFunction) => {
+    try {
+      const t = readCookie(req, REFRESH_COOKIE);
+      if (t) {
+        const s = await prisma.session.findUnique({ where: { refreshHash: sha256(t) }, select: { familyId: true } });
+        if (s) (req as any).refreshFamily = s.familyId;
+      }
+      next();
+    } catch (e) {
+      next(e);
+    }
+  };
+  const perSession = rateLimit({ windowMs: RATE_WINDOW_MS, limit: o.perSession, standardHeaders: true, legacyHeaders: false, message: RATE_LIMITED, skip: (req) => !known(req), keyGenerator: (req) => `fam:${(req as any).refreshFamily}` });
+  const anonymous = rateLimit({ windowMs: RATE_WINDOW_MS, limit: o.anonymous, standardHeaders: true, legacyHeaders: false, message: RATE_LIMITED, skip: known, keyGenerator: (req) => `anon:${ipKeyGenerator(req.ip ?? '')}` });
+  return [identify, perSession, anonymous];
+}
+const refreshLimiters = makeRefreshLimiters({ perSession: Number(process.env.REFRESH_RATE_LIMIT || 120), anonymous: Number(process.env.REFRESH_ANON_RATE_LIMIT || 300) });
 
 const GENERIC = 'The username or password you entered is incorrect.'; // UI-05: same for unknown, wrong, inactive and locked
 const MFA_GENERIC = 'The code is incorrect or has expired. Please try again.';
@@ -142,7 +177,7 @@ r.post('/mfa/verify', limiter, ah(async (req, res) => {
 }));
 
 // ── Refresh (cookie) with rotation and reuse detection ──
-r.post('/refresh', limiter, ah(async (req, res) => {
+r.post('/refresh', ...refreshLimiters, ah(async (req, res) => {
   assertCsrfSafe(req);
   const token = readCookie(req, REFRESH_COOKIE);
   const expired = () => {

@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import { api, getSession, onSession, restoreSession, setSession, type MfaChallenge, type Session } from './api';
+import { toast } from 'sonner';
+import { api, getSession, onRefreshRateLimited, onSession, restoreSession, setSession, type MfaChallenge, type Session } from './api';
 
 export type LoginResult = { kind: 'session'; session: Session } | { kind: 'mfa'; challenge: MfaChallenge };
 
@@ -21,6 +22,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   useEffect(() => { const off = onSession(set); return () => { off(); }; }, []);
   useEffect(() => { restoreSession().finally(() => setReady(true)); }, []);
+  // P2: a rate-limited refresh while working is explained once (not a silent sign-out).
+  useEffect(() => { const off = onRefreshRateLimited((m) => toast.error(m, { id: 'refresh-rate-limit', duration: 10_000 })); return () => { off(); }; }, []);
   const user = session?.user ?? null;
   const can = (...perms: string[]) => !!user && (user.perms.includes('*') || perms.some((p) => user.perms.includes(p)));
   const hasRole = (...roles: string[]) => !!user && roles.some((r) => user.roles.includes(r));
