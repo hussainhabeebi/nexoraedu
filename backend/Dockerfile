@@ -1,5 +1,7 @@
 FROM node:22-alpine AS build
 WORKDIR /app
+# Prisma detects the OpenSSL version with the `openssl` tool; without it, `prisma migrate deploy` fails on Alpine.
+RUN apk add --no-cache openssl
 COPY package*.json ./
 RUN npm ci
 COPY prisma ./prisma
@@ -9,6 +11,8 @@ RUN npx prisma generate && npx tsc -p tsconfig.json
 
 FROM node:22-alpine
 WORKDIR /app
+# Prisma detects the OpenSSL version with the `openssl` tool; without it, `prisma migrate deploy` fails on Alpine.
+RUN apk add --no-cache openssl
 ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm ci --omit=dev && npm i --no-save prisma@5
