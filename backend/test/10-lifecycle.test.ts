@@ -1,27 +1,19 @@
 /**
  * End-to-end lifecycle (SRS §21): Enquiry → Application → Admission approval → Student → Fees → Exam → Result.
- * Runs against a disposable PostgreSQL database (TEST_DATABASE_URL).
+ * Runs against the disposable test database as the restricted app role. Privileged users (MFA roles) use
+ * fixture sessions; non-privileged users sign in over HTTP.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
-
-process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || 'postgresql://nexora:nexora@localhost:5432/nexora_test?schema=public';
-const { createApp } = await import('../src/app');
-const { prisma } = await import('../src/lib/prisma');
-const app = createApp();
-
-async function login(identifier: string, password = 'Admin@12345') {
-  const r = await request(app).post('/api/v1/auth/login').send({ identifier, password });
-  expect(r.status, JSON.stringify(r.body)).toBe(200);
-  return r.body.accessToken as string;
-}
-const as = (t: string) => ({ Authorization: `Bearer ${t}` });
+import { app, as, login, prisma, sessionFor } from './helpers';
 
 let counselor: string, salesmgr: string, accounts: string, examOfficer: string, admin: string;
 let courseId: string, batchId: string, studentId: string, studentToken: string;
 
 beforeAll(async () => {
-  [counselor, salesmgr, accounts, examOfficer, admin] = await Promise.all(['counselor1', 'salesmgr', 'accounts', 'examofficer', 'admin'].map((u) => login(u)));
+  counselor = await login('counselor1');
+  // MFA roles (Sales Manager and Exam Officer included per decision 3) use fixture sessions.
+  [salesmgr, examOfficer, accounts, admin] = await Promise.all([sessionFor('salesmgr'), sessionFor('examofficer'), sessionFor('accounts'), sessionFor('owner2')]);
   const c = await prisma.course.findUniqueOrThrow({ where: { code: 'FSD' }, include: { batches: true } });
   courseId = c.id;
   batchId = c.batches.find((b) => b.status === 'RUNNING')!.id;
@@ -121,8 +113,12 @@ describe('finance', () => {
     const p = await prisma.payment.findFirstOrThrow({ where: { studentId } });
     const req1 = await request(app).post(`/api/v1/finance/payments/${p.id}/cancel-request`).set(as(accounts)).send({ reason: 'Wrong student selected' });
     expect(req1.status).toBe(200);
-    const finmgr = await login('finmgr');
+    const finmgr = await sessionFor('finmgr');
     await request(app).post(`/api/v1/approvals/${req1.body.approval.id}/act`).set(as(finmgr)).send({ action: 'APPROVE' });
+    // SRS 22.6 (decision 2026-11-06): a receipt of 10,000 or more also needs Management.
+    expect(Number(p.amount)).toBe(10000); // at the threshold: level 2 applies
+    expect((await prisma.payment.findUniqueOrThrow({ where: { id: p.id } })).status).toBe('CANCEL_REQUESTED');
+    await request(app).post(`/api/v1/approvals/${req1.body.approval.id}/act`).set(as(await sessionFor('director'))).send({ action: 'APPROVE' });
     const types = (await prisma.ledgerEntry.findMany({ where: { studentId } })).map((e) => e.type);
     expect(types).toContain('REVERSAL');
     expect((await prisma.payment.findUniqueOrThrow({ where: { id: p.id } })).status).toBe('CANCELLED');
@@ -142,9 +138,20 @@ describe('online exam', () => {
     expect((await request(app).post(`/api/v1/exams/exams/${ex.body.id}/schedule`).set(as(examOfficer))).status).toBe(200);
 
     const st = await prisma.student.findUniqueOrThrow({ where: { id: studentId }, include: { user: true } });
-    const bcrypt = (await import('bcryptjs')).default;
-    await prisma.user.update({ where: { id: st.userId! }, data: { passwordHash: await bcrypt.hash('Student@123', 10) } });
-    studentToken = await login(st.studentCode.toLowerCase(), 'Student@123');
+    // Decision 8: admission creates the portal account WITHOUT a password and sends a single-use activation link.
+    const u = await prisma.user.findUniqueOrThrow({ where: { id: st.userId! } });
+    expect(u.passwordHash.startsWith('$2')).toBe(false);
+    expect(await prisma.passwordReset.count({ where: { userId: u.id, purpose: 'ENROLL', usedAt: null } })).toBe(1);
+    await new Promise((r) => setTimeout(r, 200));
+    const logs = await prisma.notificationLog.findMany({ where: { templateKey: 'admission.confirmed' } });
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs.every((l) => l.body.startsWith('[redacted'))).toBe(true); // the link never sits in the log
+    // The student activates with the link (a fresh link is issued here because only its hash is stored).
+    const { issueActivationLink } = await import('../src/lib/activation');
+    const act = await issueActivationLink(prisma, u.id);
+    const activated = await request(app).post('/api/v1/auth/reset-password').send({ token: act.token, newPassword: 'Velvet#Comet-Trail-2026' });
+    expect(activated.status, JSON.stringify(activated.body)).toBe(200);
+    studentToken = await login(st.studentCode.toLowerCase(), 'Velvet#Comet-Trail-2026');
 
     const start = await request(app).post(`/api/v1/portal/exams/${ex.body.id}/start`).set(as(studentToken)).send({ acknowledged: true });
     expect(start.status, JSON.stringify(start.body)).toBe(200);

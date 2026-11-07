@@ -12,15 +12,22 @@ import { Avatar, Badge, Card, cx, Input, Modal, PageHeader, PageLoader, Select, 
 function UserModal({ open, onClose, user, roles, departments }: { open: boolean; onClose: () => void; user?: any; roles: any[]; departments: any[] }) {
   const { hasRole } = useAuth();
   const [f, setF] = useState<any>(user ? { name: user.name, email: user.email, username: user.username, phone: user.phone ?? '', designation: user.designation ?? '', departmentId: user.department?.id ?? '', roles: user.roles.map((r: any) => r.key), isActive: user.isActive } : { name: '', email: '', username: '', phone: '', designation: '', departmentId: '', roles: [], isActive: true });
-  const [temp, setTemp] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ title: string; text: string } | null>(null);
   const m = useMut(() => (user ? api(`/admin/users/${user.id}`, { method: 'PATCH', body: { ...f, departmentId: f.departmentId || null } }) : api('/admin/users', { body: { ...f, departmentId: f.departmentId || null } })), {
-    success: 'User saved', invalidate: ['/admin'], onSuccess: (r: any) => (r.temporaryPassword ? setTemp(r.temporaryPassword) : onClose()),
+    success: 'User saved', invalidate: ['/admin'],
+    onSuccess: (r: any) => {
+      const pending = r.pendingRoles?.length ? ` Privileged role(s) ${r.pendingRoles.join(', ')} await approval by another Super Administrator.` : '';
+      if (r.activationSent) setNotice({ title: 'Activation link sent', text: `A single-use activation link (valid ${r.activationHours} hours) was sent to the user's email/WhatsApp. No password is created or shown.${pending}` });
+      else if (pending) setNotice({ title: 'Saved — approval needed', text: pending.trim() });
+      else onClose();
+    },
   });
-  const reset = useMut(() => api(`/admin/users/${user.id}/reset-password`, { body: {} }), { onSuccess: (r: any) => setTemp(r.temporaryPassword) });
-  if (temp) return <Modal open onClose={onClose} title="Temporary password" size="sm" footer={<button className="btn-primary" onClick={onClose}>Done</button>}><p className="text-sm text-slate-600">Share this one-time password securely. The user must change it at first login. It has also been sent by email/WhatsApp where configured.</p><p className="mt-3 rounded-lg bg-slate-100 p-3 text-center font-mono text-lg">{temp}</p></Modal>;
+  const reset = useMut(() => api(`/admin/users/${user.id}/reset-password`, { body: {} }), { onSuccess: () => setNotice({ title: 'Reset link sent', text: "A single-use password reset link (valid 24 hours) was sent to the user's registered email/WhatsApp. Their current sessions were ended." }) });
+  const resend = useMut(() => api(`/admin/users/${user.id}/resend-activation`, { body: {} }), { onSuccess: (r: any) => setNotice({ title: 'Activation link re-sent', text: `A new activation link (valid ${r.activationHours} hours) was sent. Earlier links no longer work.` }) });
+  if (notice) return <Modal open onClose={onClose} title={notice.title} size="sm" footer={<button className="btn-primary" onClick={onClose}>Done</button>}><p className="text-sm text-slate-600">{notice.text}</p></Modal>;
   const available = roles.filter((r) => r.key !== 'student' && (r.key !== 'super_admin' || hasRole('super_admin')));
   return (
-    <Modal open={open} onClose={onClose} title={user ? `Edit ${user.name}` : 'New user'} size="lg" footer={<>{user && <button className="btn-secondary mr-auto" onClick={() => reset.mutate(undefined)}><KeyRound className="h-4 w-4" /> Reset password</button>}<button className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-primary" disabled={!f.name || !f.email || !f.username || !f.roles.length || m.isPending} onClick={() => m.mutate(undefined)}>Save</button></>}>
+    <Modal open={open} onClose={onClose} title={user ? `Edit ${user.name}` : 'New user'} size="lg" footer={<>{user && <><button className="btn-secondary mr-auto" onClick={() => reset.mutate(undefined)}><KeyRound className="h-4 w-4" /> Send reset link</button><button className="btn-ghost" onClick={() => resend.mutate(undefined)}>Resend activation</button></>}<button className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-primary" disabled={!f.name || !f.email || !f.username || !f.roles.length || m.isPending} onClick={() => m.mutate(undefined)}>Save</button></>}>
       <div className="grid gap-4 sm:grid-cols-2">
         <Input label="Full name" required value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
         <Input label="Email" type="email" required value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} />
@@ -71,7 +78,7 @@ export default function Users() {
   const roles = useGet<any>('/admin/roles');
   const deps = useGet<any>('/admin/departments');
   const [edit, setEdit] = useState<any>(null);
-  const importM = useMut((rows: any[]) => api('/admin/users/import', { body: { rows } }), { invalidate: ['/admin'], onSuccess: (r: any) => toast.success(`${r.results.filter((x: any) => x.ok).length} imported, ${r.results.filter((x: any) => !x.ok).length} failed`) });
+  const importM = useMut((rows: any[]) => api('/admin/users/import', { body: { rows } }), { invalidate: ['/admin'], onSuccess: (r: any) => toast.success(`${r.results.filter((x: any) => x.ok).length} imported (activation links sent), ${r.results.filter((x: any) => !x.ok).length} failed`) });
   return (
     <div>
       <PageHeader title="Users & roles" actions={can('users:manage') && tab === 'users' && <>

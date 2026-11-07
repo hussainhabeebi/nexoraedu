@@ -8,8 +8,11 @@ import { can, userCan } from '../lib/auth';
 import { audit } from '../lib/audit';
 import { getSettings } from '../lib/settings';
 import { money, toCsv } from '../lib/util';
+import { dayDiff, formatDate, toCalendarDate } from '../lib/caldate';
+import { reconcile } from '../services/reconciliation';
 import { createApproval } from '../services/approvals';
-import { createFeePlan, ledger, recordPayment, studentBalance } from '../services/finance';
+import { ACTIVE_REFUND_STATUSES, assertCancellationKeepsRefundsCovered, courseFee, createFeePlan, ledger, lockStudentAccount, recordPayment, studentBalance } from '../services/finance';
+import { earlierPlansForCourse, feeEnrollmentChain, requestFeeAdjustment, requestRebill } from '../services/feeAdjustments';
 import { notifyLater } from '../services/notify';
 
 const r = Router();
@@ -17,27 +20,60 @@ const r = Router();
 r.get('/students/:id/account', can('finance:read'), ah(async (req, res) => {
   const st = await prisma.student.findUnique({ where: { id: req.params.id }, include: { course: true, batch: true } });
   if (!st) throw notFound('Student not found');
-  const [plans, invoices, payments, entries, discounts, refunds, balance] = await Promise.all([
-    prisma.feePlan.findMany({ where: { studentId: st.id }, include: { installments: { orderBy: { seq: 'asc' } } } }),
+  const [plans, invoices, payments, entries, discounts, refunds, balance, adjustments] = await Promise.all([
+    // Newest plan first (after a course change the current enrollment's plan is the latest one).
+    prisma.feePlan.findMany({ where: { studentId: st.id }, orderBy: { createdAt: 'desc' }, include: { installments: { orderBy: { seq: 'asc' } }, enrollment: { select: { id: true, status: true, startDate: true, endedAt: true, course: { select: { name: true } }, batch: { select: { code: true } } } } } }),
     prisma.invoice.findMany({ where: { studentId: st.id }, orderBy: { number: 'asc' } }),
     prisma.payment.findMany({ where: { studentId: st.id }, orderBy: { paidAt: 'desc' }, include: { allocations: true } }),
     prisma.ledgerEntry.findMany({ where: { studentId: st.id }, orderBy: { createdAt: 'asc' } }),
     prisma.discount.findMany({ where: { studentId: st.id }, orderBy: { createdAt: 'desc' } }),
     prisma.refund.findMany({ where: { studentId: st.id }, orderBy: { createdAt: 'desc' } }),
     studentBalance(st.id),
+    prisma.feeAdjustment.findMany({ where: { studentId: st.id }, orderBy: { createdAt: 'desc' } }),
   ]);
   let run = 0;
   const ledgerRows = entries.map((e) => ((run = money(run + Number(e.debit) - Number(e.credit))), { ...e, balance: run }));
-  res.json({ student: st, plans, invoices, payments, ledger: ledgerRows, discounts, refunds, balance });
+  // Whether a plan can be created for the current enrollment, and whether it needs approval (B2).
+  const cur = await prisma.enrollment.findFirst({ where: { studentId: st.id, courseId: st.courseId, status: { in: ['ACTIVE', 'ON_HOLD'] } } });
+  let newPlan: { allowed: boolean; needsApproval: boolean; pendingAdjustmentId: string | null } = { allowed: false, needsApproval: false, pendingAdjustmentId: null };
+  if (cur) {
+    const chain = await feeEnrollmentChain(prisma as any, cur.id);
+    const has = await prisma.feePlan.count({ where: { studentId: st.id, OR: [{ enrollmentId: { in: chain } }, { enrollmentId: null, courseId: st.courseId }] } });
+    const earlier = has ? [] : await earlierPlansForCourse(prisma as any, st.id, st.courseId, chain);
+    const pending = adjustments.find((a) => a.kind === 'REBILL' && a.status === 'PENDING_APPROVAL');
+    newPlan = { allowed: !has, needsApproval: !has && earlier.length > 0, pendingAdjustmentId: pending?.id ?? null };
+  }
+  res.json({ student: st, plans, invoices, payments, ledger: ledgerRows, discounts, refunds, adjustments, balance, newPlan });
 }));
 
 r.post('/students/:id/fee-plan', can('finance:manage'), ah(async (req, res) => {
-  const { installments, startDate } = z.object({ installments: z.number().int().min(1).max(24), startDate: z.coerce.date().optional() }).parse(req.body);
+  // startDate: a calendar date "YYYY-MM-DD" in the academy time zone (preferred) or an ISO timestamp.
+  const { installments, startDate, reason } = z.object({ installments: z.number().int().min(1).max(24), startDate: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.coerce.date()]).optional(), reason: z.string().trim().min(5).max(500).optional() }).parse(req.body);
   const st = await prisma.student.findUniqueOrThrow({ where: { id: req.params.id } });
-  const existing = await prisma.feePlan.count({ where: { studentId: st.id, courseId: st.courseId } });
-  if (existing) throw badRequest('A fee plan already exists for this course. Use discounts or adjustments instead.');
-  const plan = await prisma.$transaction((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments, startDate, userId: req.user!.id }));
-  await audit(req, 'CREATE', 'fee_plan', plan.id, null, { installments });
+  const enrollment = await prisma.enrollment.findFirst({ where: { studentId: st.id, courseId: st.courseId, status: { in: ['ACTIVE', 'ON_HOLD'] } } });
+  if (!enrollment) throw badRequest('The student has no current enrollment in this course.');
+  // One plan per course enrollment. A batch transfer within the same course continues the same course (and its
+  // plan, which stays on the earlier enrollment in the chain); only a course change may get a new plan.
+  const chain = await feeEnrollmentChain(prisma as any, enrollment.id);
+  const existing = await prisma.feePlan.count({ where: { studentId: st.id, OR: [{ enrollmentId: { in: chain } }, { enrollmentId: null, courseId: st.courseId }] } });
+  if (existing) throw badRequest('A fee plan already exists for this enrollment. Use discounts or adjustments instead.');
+  // B2 (decision 2026-11-06): the student was billed for this course before (e.g. returned to it after a course
+  // change). A second plan for the same course is created only through an approved fee adjustment (REBILL).
+  const earlier = await earlierPlansForCourse(prisma as any, st.id, st.courseId, chain);
+  if (earlier.length && (await courseFee(prisma as any, st.courseId)).gross > 0) {
+    if (!reason) throw badRequest('This student was already billed for this course. Give a reason: the new plan needs approval.', { needsApproval: true });
+    const out = await prisma.$transaction(async (tx) => {
+      const out = await requestRebill(tx, { studentId: st.id, plan: { enrollmentId: enrollment.id, courseId: st.courseId, installments, startDate: startDate instanceof Date ? startDate.toISOString() : startDate }, earlierPlanId: earlier[earlier.length - 1].id, reason, requestedById: req.user!.id });
+      await audit(tx, req, 'CREATE', 'fee_adjustment', out.adjustment.id, null, { kind: 'REBILL', studentId: st.id, installments, startDate, amount: Number(out.adjustment.amount), earlierPlanIds: earlier.map((p) => p.id), approvalId: out.approval.id });
+      return out;
+    });
+    return res.status(202).json({ needsApproval: true, ...out });
+  }
+  const plan = await prisma.$transaction(async (tx) => {
+    const plan = await createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments, startDate, userId: req.user!.id });
+    await audit(tx, req, 'CREATE', 'fee_plan', plan.id, null, { studentId: st.id, installments, startDate });
+    return plan;
+  });
   res.status(201).json(plan);
 }));
 
@@ -54,8 +90,12 @@ r.post('/payments', can('finance:collect'), ah(async (req, res) => {
   const d = paymentSchema.parse(req.body);
   if (['CHEQUE', 'BANK_TRANSFER', 'UPI', 'CARD'].includes(d.mode) && !d.reference) throw badRequest('Reference number is required for this payment mode.');
   const key = req.get('Idempotency-Key') || undefined;
-  const p = await prisma.$transaction((tx) => recordPayment(tx, { ...d, idempotencyKey: key, userId: req.user!.id }));
-  await audit(req, 'CREATE', 'payment', p.id, null, d);
+  const p = await prisma.$transaction(async (tx) => {
+    const before = key ? await tx.payment.findUnique({ where: { idempotencyKey: key }, select: { id: true } }) : null;
+    const p = await recordPayment(tx, { ...d, idempotencyKey: key, userId: req.user!.id });
+    if (!before) await audit(tx, req, 'CREATE', 'payment', p.id, null, { ...d, receiptNumber: p.receiptNumber });
+    return p;
+  });
   const st = await prisma.student.findUniqueOrThrow({ where: { id: d.studentId }, include: { lead: true } });
   const bal = await studentBalance(st.id);
   notifyLater('payment.received', { userId: st.userId, name: st.fullName, email: st.email, phone: st.phone, conversationId: st.lead?.chatwootConversationId }, { name: st.fullName, amount: money(p.amount).toFixed(2), receipt: p.receiptNumber, balance: bal.toFixed(2), date: p.paidAt.toLocaleDateString('en-IN') });
@@ -74,6 +114,7 @@ r.get('/payments', can('finance:read'), ah(async (req, res) => {
   const include = { student: { select: { id: true, fullName: true, studentCode: true } } };
   if (req.query.format === 'csv') {
     const all = await prisma.payment.findMany({ where, include, orderBy: { paidAt: 'desc' }, take: 10000 });
+    await audit(prisma, req, 'EXPORT', 'payment', null, null, { format: 'csv', rows: all.length, filters: req.query }); // RPT-08
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="payments.csv"');
     return res.send(toCsv(all.map((p) => ({ receipt: p.receiptNumber, date: p.paidAt, student: p.student.fullName, studentId: p.student.studentCode, amount: Number(p.amount), mode: p.mode, reference: p.reference, status: p.status }))));
@@ -100,7 +141,7 @@ export async function receiptPdf(paymentId: string, out: NodeJS.WritableStream) 
   doc.moveDown(0.5).fontSize(9);
   const row = (k: string, v: string) => doc.font('Helvetica-Bold').text(k, { continued: true, width: 120 }).font('Helvetica').text(`  ${v}`);
   row('Receipt No:', p.receiptNumber);
-  row('Date:', p.paidAt.toLocaleDateString('en-IN'));
+  row('Date:', formatDate(p.paidAt, (await getSettings()).academy.timeZone));
   row('Student:', `${p.student.fullName} (${p.student.studentCode})`);
   row('Course / Batch:', `${p.student.course.name}${p.student.batch ? ' / ' + p.student.batch.code : ''}`);
   row('Payment mode:', p.mode + (p.reference ? ` — Ref ${p.reference}` : ''));
@@ -124,55 +165,80 @@ r.post('/payments/:id/cancel-request', can('finance:collect'), ah(async (req, re
   const p = await prisma.payment.findUniqueOrThrow({ where: { id: req.params.id }, include: { student: true } });
   if (p.status !== 'POSTED') throw badRequest(`Payment is already ${p.status.toLowerCase().replace('_', ' ')}.`);
   const a = await prisma.$transaction(async (tx) => {
-    await tx.payment.update({ where: { id: p.id }, data: { status: 'CANCEL_REQUESTED' } });
-    return createApproval(tx, { type: 'PAYMENT_CANCELLATION', entityType: 'payment', entityId: p.id, title: `Cancel receipt ${p.receiptNumber} — ${p.student.fullName} (${money(p.amount)})`, payload: { reason }, amount: Number(p.amount), requestedById: req.user!.id });
+    await lockStudentAccount(tx, p.studentId);
+    await assertCancellationKeepsRefundsCovered(tx, p); // B1: refunds must stay covered by the remaining receipts
+    const moved = await tx.payment.updateMany({ where: { id: p.id, status: 'POSTED' }, data: { status: 'CANCEL_REQUESTED' } });
+    if (moved.count !== 1) throw badRequest('This payment already has a cancellation request.');
+    const a = await createApproval(tx, { type: 'PAYMENT_CANCELLATION', entityType: 'payment', entityId: p.id, title: `Cancel receipt ${p.receiptNumber} — ${p.student.fullName} (${money(p.amount)})`, payload: { reason }, amount: Number(p.amount), requestedById: req.user!.id });
+    await audit(tx, req, 'CANCEL_REQUEST', 'payment', p.id, { status: 'POSTED' }, { status: 'CANCEL_REQUESTED', reason, approvalId: a.id });
+    return a;
   });
-  await audit(req, 'CANCEL_REQUEST', 'payment', p.id, null, { reason });
   res.json({ approval: a });
 }));
 
 // FIN-09/10 discounts & scholarships
 r.post('/discounts', can('finance:collect', 'finance:manage'), ah(async (req, res) => {
-  const d = z.object({ studentId: z.string(), kind: z.enum(['FIXED', 'PERCENT', 'SCHOLARSHIP']), value: z.coerce.number().positive(), reason: z.string().min(3) }).parse(req.body);
-  const plan = await prisma.feePlan.findFirst({ where: { studentId: d.studentId }, orderBy: { createdAt: 'desc' }, include: { installments: true } });
-  if (!plan) throw badRequest('Student has no fee plan.');
+  const { feePlanId, ...d } = z.object({ studentId: z.string(), feePlanId: z.string().optional(), kind: z.enum(['FIXED', 'PERCENT', 'SCHOLARSHIP']), value: z.coerce.number().positive(), reason: z.string().min(3) }).parse(req.body);
+  // A student can have one plan per course enrollment (course change): the discount targets the chosen plan,
+  // or the newest one when none is given (previous behaviour).
+  const plan = feePlanId
+    ? await prisma.feePlan.findFirst({ where: { id: feePlanId, studentId: d.studentId }, include: { installments: true } })
+    : await prisma.feePlan.findFirst({ where: { studentId: d.studentId }, orderBy: { createdAt: 'desc' }, include: { installments: true } });
+  if (!plan) throw feePlanId ? notFound('Fee plan not found for this student.') : badRequest('Student has no fee plan.');
   const unpaid = plan.installments.reduce((s, i) => s + Number(i.amount) - Number(i.paidAmount), 0);
   const amount = money(d.kind === 'PERCENT' ? (Number(plan.grossAmount) * Math.min(d.value, 100)) / 100 : d.value);
   if (amount > unpaid + 0.001) throw badRequest(`Discount (${amount}) cannot exceed the unpaid amount (${money(unpaid)}).`);
   const st = await prisma.student.findUniqueOrThrow({ where: { id: d.studentId } });
-  const s = await getSettings();
   const result = await prisma.$transaction(async (tx) => {
     const disc = await tx.discount.create({ data: { ...d, amount, feePlanId: plan.id, requestedById: req.user!.id } });
-    // Within limit and requested by a finance manager → single-level auto-approval; otherwise workflow.
-    const selfApprove = userCan(req, 'finance:manage') && amount <= s.finance.discountApprovalLimit && d.kind !== 'SCHOLARSHIP';
+    // FIN-09 / decision 5 (2026-11-05): every discount and scholarship goes through the configured approval
+    // workflow — there is no automatic exemption, for any role or amount.
     const appr = await createApproval(tx, {
-      type: selfApprove ? 'DISCOUNT_AUTO' : 'DISCOUNT', entityType: 'discount', entityId: disc.id,
+      type: 'DISCOUNT', entityType: 'discount', entityId: disc.id,
       title: `${d.kind === 'SCHOLARSHIP' ? 'Scholarship' : 'Discount'} ${money(amount)} for ${st.fullName}: ${d.reason}`, payload: d, amount, requestedById: req.user!.id,
     });
-    if (selfApprove) {
-      const { applyDiscount } = await import('../services/finance');
-      await applyDiscount(tx, disc.id, req.user!.id);
-    }
+    await audit(tx, req, 'CREATE', 'discount', disc.id, null, { ...d, feePlanId: plan.id, amount, approvalId: appr.id });
     return { discount: disc, approval: appr };
   });
-  await audit(req, 'CREATE', 'discount', result.discount.id, null, { ...d, amount });
   res.status(201).json(result);
+}));
+
+// SRS 22.6 / FIN-03 fee adjustments: waiver or custom installment plan — always through the approval workflow.
+const scheduleRow = z.object({ dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), amount: z.coerce.number().positive() });
+r.post('/adjustments', can('finance:collect', 'finance:manage'), ah(async (req, res) => {
+  const d = z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('WAIVER'), studentId: z.string(), feePlanId: z.string(), amount: z.coerce.number().positive(), reason: z.string().trim().min(5).max(500) }),
+    z.object({ kind: z.literal('RESCHEDULE'), studentId: z.string(), feePlanId: z.string(), schedule: z.array(scheduleRow).min(1).max(24), reason: z.string().trim().min(5).max(500) }),
+  ]).parse(req.body);
+  const out = await prisma.$transaction(async (tx) => {
+    const out = await requestFeeAdjustment(tx, { ...d, requestedById: req.user!.id });
+    await audit(tx, req, 'CREATE', 'fee_adjustment', out.adjustment.id, null, { ...d, amount: Number(out.adjustment.amount), approvalId: out.approval.id });
+    return out;
+  });
+  res.status(201).json(out);
+}));
+r.get('/adjustments', can('finance:read'), ah(async (req, res) => {
+  const where: any = { ...(req.query.studentId && { studentId: String(req.query.studentId) }), ...(req.query.status && { status: String(req.query.status) }) };
+  const items = await prisma.feeAdjustment.findMany({ where, orderBy: { createdAt: 'desc' }, take: 200, include: { student: { select: { id: true, fullName: true, studentCode: true } } } });
+  res.json({ items });
 }));
 
 // FIN-11 refunds
 r.post('/refunds', can('finance:collect', 'finance:manage'), ah(async (req, res) => {
   const d = z.object({ studentId: z.string(), amount: z.coerce.number().positive(), reason: z.string().min(5) }).parse(req.body);
-  const paid = await prisma.payment.aggregate({ where: { studentId: d.studentId, status: 'POSTED' }, _sum: { amount: true } });
-  const refunded = await prisma.refund.aggregate({ where: { studentId: d.studentId, status: { in: ['APPROVED', 'PAID', 'PENDING_APPROVAL'] } }, _sum: { amount: true } });
-  const max = money(Number(paid._sum.amount ?? 0) - Number(refunded._sum.amount ?? 0));
-  if (d.amount > max) throw badRequest(`Refund cannot exceed the refundable amount (${max}).`);
   const st = await prisma.student.findUniqueOrThrow({ where: { id: d.studentId } });
   const out = await prisma.$transaction(async (tx) => {
+    // Same lock as receipt cancellation (B1), so a refund and a cancellation cannot both pass the checks at once.
+    await lockStudentAccount(tx, d.studentId);
+    const paid = await tx.payment.aggregate({ where: { studentId: d.studentId, status: 'POSTED' }, _sum: { amount: true } });
+    const refunded = await tx.refund.aggregate({ where: { studentId: d.studentId, status: { in: ACTIVE_REFUND_STATUSES } }, _sum: { amount: true } });
+    const max = money(Number(paid._sum.amount ?? 0) - Number(refunded._sum.amount ?? 0));
+    if (d.amount > max) throw badRequest(`Refund cannot exceed the refundable amount (${max}).`);
     const rf = await tx.refund.create({ data: { ...d, requestedById: req.user!.id } });
     const a = await createApproval(tx, { type: 'REFUND', entityType: 'refund', entityId: rf.id, title: `Refund ${money(d.amount)} to ${st.fullName}: ${d.reason}`, payload: d, amount: d.amount, requestedById: req.user!.id });
+    await audit(tx, req, 'CREATE', 'refund', rf.id, null, { ...d, approvalId: a.id });
     return { refund: rf, approval: a };
   });
-  await audit(req, 'CREATE', 'refund', out.refund.id, null, d);
   res.status(201).json(out);
 }));
 r.post('/refunds/:id/pay', can('finance:manage'), ah(async (req, res) => {
@@ -180,11 +246,13 @@ r.post('/refunds/:id/pay', can('finance:manage'), ah(async (req, res) => {
   const rf = await prisma.refund.findUniqueOrThrow({ where: { id: req.params.id } });
   if (rf.status !== 'APPROVED') throw badRequest('Only approved refunds can be paid.');
   await prisma.$transaction(async (tx) => {
-    await tx.refund.update({ where: { id: rf.id }, data: { status: 'PAID', reference, paidAt: new Date() } });
+    // Conditional transition prevents paying the same refund twice under concurrency.
+    const paid = await tx.refund.updateMany({ where: { id: rf.id, status: 'APPROVED' }, data: { status: 'PAID', reference, paidAt: new Date() } });
+    if (paid.count !== 1) throw badRequest('Only approved refunds can be paid.');
     await ledger(tx, { studentId: rf.studentId, type: 'REFUND', debit: Number(rf.amount), refType: 'refund', refId: rf.id, narration: `Refund paid (ref ${reference})`, userId: req.user!.id });
     await tx.studentHistory.create({ data: { studentId: rf.studentId, type: 'FEE', message: `Refund of ${money(rf.amount)} paid`, userId: req.user!.id } });
+    await audit(tx, req, 'PAY', 'refund', rf.id, { status: 'APPROVED' }, { status: 'PAID', reference });
   });
-  await audit(req, 'PAY', 'refund', rf.id, null, { reference });
   res.json({ ok: true });
 }));
 r.get('/refunds', can('finance:read'), ah(async (req, res) => {
@@ -196,9 +264,10 @@ r.get('/refunds', can('finance:read'), ah(async (req, res) => {
 
 // FIN-07/15 outstanding with ageing buckets
 r.get('/outstanding', can('finance:read'), ah(async (req, res) => {
-  const now = Date.now();
+  const tz = (await getSettings()).academy.timeZone;
+  const todayCal = toCalendarDate(new Date(), tz);
   const insts = await prisma.installment.findMany({
-    where: { status: { not: 'PAID' }, feePlan: { student: { status: { notIn: ['WITHDRAWN', 'TERMINATED'] }, ...(req.query.courseId && { courseId: String(req.query.courseId) }), ...(req.query.batchId && { batchId: String(req.query.batchId) }) } } },
+    where: { status: { in: ['DUE', 'PARTIAL'] }, feePlan: { student: { status: { notIn: ['WITHDRAWN', 'TERMINATED'] }, ...(req.query.courseId && { courseId: String(req.query.courseId) }), ...(req.query.batchId && { batchId: String(req.query.batchId) }) } } },
     include: { feePlan: { include: { student: { select: { id: true, fullName: true, studentCode: true, phone: true, batch: { select: { code: true } }, course: { select: { name: true } } } } } } },
     orderBy: { dueDate: 'asc' },
   });
@@ -207,19 +276,21 @@ r.get('/outstanding', can('finance:read'), ah(async (req, res) => {
   for (const i of insts) {
     const open = money(Number(i.amount) - Number(i.paidAmount));
     if (open <= 0) continue;
-    const days = Math.floor((now - i.dueDate.getTime()) / 864e5);
-    const b = days < 0 ? 'notDue' : days <= 30 ? 'd0_30' : days <= 60 ? 'd31_60' : days <= 90 ? 'd61_90' : 'd90p';
+    // FIN-07 ageing in whole calendar days in the academy zone: due today = not yet overdue; due yesterday = 1 day.
+    const days = dayDiff(toCalendarDate(i.dueDate, tz), todayCal);
+    const b = days <= 0 ? 'notDue' : days <= 30 ? 'd0_30' : days <= 60 ? 'd31_60' : days <= 90 ? 'd61_90' : 'd90p';
     buckets[b] = money(buckets[b] + open);
     const st = i.feePlan.student;
     const row = byStudent.get(st.id) ?? { studentId: st.id, studentCode: st.studentCode, name: st.fullName, phone: st.phone, course: st.course.name, batch: st.batch?.code, due: 0, overdue: 0, oldestDue: i.dueDate, maxDaysOverdue: 0 };
     row.due = money(row.due + open);
-    if (days >= 0) row.overdue = money(row.overdue + open);
+    if (days > 0) row.overdue = money(row.overdue + open);
     row.maxDaysOverdue = Math.max(row.maxDaysOverdue, days);
     byStudent.set(st.id, row);
   }
   let items = [...byStudent.values()].sort((a, b) => b.overdue - a.overdue);
   if (req.query.onlyOverdue === 'true') items = items.filter((i) => i.overdue > 0);
   if (req.query.format === 'csv') {
+    await audit(prisma, req, 'EXPORT', 'outstanding', null, null, { format: 'csv', rows: items.length, filters: req.query }); // RPT-08
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="outstanding.csv"');
     return res.send(toCsv(items));
@@ -257,6 +328,14 @@ r.get('/collections', can('finance:read'), ah(async (req, res) => {
 r.post('/reminders/run', can('finance:collect'), ah(async (_req, res) => {
   const { runFeeReminders } = await import('../jobs/scheduler');
   res.json({ sent: await runFeeReminders(true) });
+}));
+
+// FIN-13 / RPT-06 reconciliation: read-only consistency check (never modifies records).
+r.get('/reconciliation', can('finance:manage', 'audit:read'), ah(async (req, res) => {
+  const studentId = req.query.studentId ? String(req.query.studentId) : undefined;
+  const out = await reconcile({ studentId });
+  await audit(prisma, req, 'REPORT_RUN', 'report', 'reconciliation', null, { studentId, ok: out.ok, bySeverity: out.bySeverity });
+  res.json(out);
 }));
 
 export default r;

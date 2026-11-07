@@ -78,7 +78,7 @@ r.post('/applications', formLimiter, upload.array('files', 8), ah(async (req, re
   const app = await prisma.$transaction(async (tx) => {
     let lead = await findDuplicateLead(tx, data.personal.phone, data.personal.email);
     if (!lead) lead = (await createLead(tx, { name: data.personal.fullName, phone: data.personal.phone, email: data.personal.email, courseId: course.id, source: 'website', city: data.personal.city }, undefined)) as any;
-    const code = await nextNumber(`application:${new Date().getFullYear()}`, s.ids.application, tx);
+    const code = await nextNumber('application:{year}', s.ids.application, tx);
     const app = await tx.application.create({ data: { code, leadId: lead!.id, courseId: course.id, batchId: data.preferences.batchId || null, data: data as any, status: 'SUBMITTED', source: 'website' } });
     if (files.length) await tx.document.createMany({ data: files.map((f, i) => ({ applicationId: app.id, type: types[i] || 'other', fileName: f.originalname, storagePath: path.basename(f.path), mimeType: f.mimetype, size: f.size })) });
     await tx.lead.update({ where: { id: lead!.id }, data: { status: 'APPLICATION', courseId: course.id, lastActivityAt: new Date() } });

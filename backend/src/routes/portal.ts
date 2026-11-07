@@ -29,7 +29,7 @@ r.get('/me', ah(async (req, res) => {
     studentAttendancePct(s.id),
     studentBalance(s.id),
     s.batchId ? prisma.timetableSession.findMany({ where: { batchId: s.batchId, published: true, cancelled: false, startsAt: { gte: now } }, orderBy: { startsAt: 'asc' }, take: 5 }) : [],
-    prisma.installment.findFirst({ where: { feePlan: { studentId: s.id }, status: { not: 'PAID' } }, orderBy: { dueDate: 'asc' } }),
+    prisma.installment.findFirst({ where: { feePlan: { studentId: s.id }, status: { in: ['DUE', 'PARTIAL'] } }, orderBy: { dueDate: 'asc' } }),
     prisma.result.findMany({ where: { studentId: s.id, exam: { resultsPublished: true } }, include: { exam: { select: { title: true, totalMarks: true, type: true } } }, orderBy: { createdAt: 'desc' }, take: 5 }),
     prisma.examAssignment.findMany({ where: { studentId: s.id, exam: { status: 'SCHEDULED', endAt: { gte: now } } }, include: { exam: { select: { id: true, title: true, startAt: true, endAt: true, durationMin: true, mode: true } } } }),
     prisma.notification.count({ where: { userId: req.user!.id, readAt: null } }),
@@ -41,6 +41,12 @@ r.get('/me', ah(async (req, res) => {
     upcoming, results, exams: exams.map((e) => e.exam), unreadNotifications: notifications,
     paymentInfo: { upi: process.env.ACADEMY_UPI_ID || null, bank: process.env.ACADEMY_BANK_DETAILS || null },
   });
+}));
+
+r.get('/enrollments', ah(async (req, res) => {
+  const s = await me(req);
+  const items = await prisma.enrollment.findMany({ where: { studentId: s.id }, orderBy: { startDate: 'desc' }, select: { id: true, status: true, startDate: true, endedAt: true, source: true, course: { select: { code: true, name: true } }, batch: { select: { code: true, name: true } } } });
+  res.json({ items });
 }));
 
 r.get('/timetable', ah(async (req, res) => {

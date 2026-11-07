@@ -9,12 +9,19 @@
     "build": "prisma generate && tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "db:migrate": "prisma migrate deploy",
-    "db:seed": "tsx prisma/seed.ts",
+    "db:seed:reference": "tsx src/seed/reference.ts",
+    "db:seed:demo": "tsx src/seed/demo.ts",
+    "release": "prisma migrate deploy && node dist/seed/reference.js",
+    "admin:bootstrap": "node dist/cli/bootstrap-admin.js",
+    "admin:bootstrap:dev": "tsx src/cli/bootstrap-admin.ts",
+    "accounts:legacy": "node dist/cli/legacy-accounts.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "finance:reconcile": "node dist/cli/reconcile.js",
+    "finance:reconcile:dev": "tsx src/cli/reconcile.ts"
   },
   "prisma": {
-    "seed": "tsx prisma/seed.ts"
+    "seed": "tsx src/seed/reference.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
@@ -44,6 +51,7 @@
     "@types/pdfkit": "^0.17.7",
     "@types/supertest": "^7.2.1",
     "@types/swagger-ui-express": "^4.1.8",
+    "@vitest/coverage-v8": "^5.1.0",
     "prisma": "^5.22.0",
     "supertest": "^7.3.1",
     "tsx": "^4.23.15",

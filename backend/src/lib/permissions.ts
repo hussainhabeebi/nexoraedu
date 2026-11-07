@@ -5,7 +5,8 @@ export const PERMISSIONS = {
   'masters:manage': 'Master data & courses',
   'leads:read': 'View own leads', 'leads:read_all': 'View all leads', 'leads:create': 'Create leads',
   'leads:update': 'Update leads', 'leads:delete': 'Delete / merge leads', 'leads:assign': 'Assign & reassign leads',
-  'students:read': 'View students', 'students:read_batch': 'View students in own batches',
+  'students:read': 'View all students', 'students:read_batch': 'View students in own batches',
+  'students:read_own': 'View students converted from own leads',
   'students:manage': 'Register & update students', 'documents:verify': 'Verify documents',
   'finance:read': 'View finance', 'finance:collect': 'Record payments & invoices', 'finance:manage': 'Fee structures, discounts, refunds',
   'academics:read': 'View academics', 'academics:manage': 'Batches, timetable, faculty allocation',
@@ -30,7 +31,9 @@ export const DEFAULT_ROLES: { key: string; name: string; permissions: Permission
     key: 'sales_manager', name: 'Sales Manager',
     permissions: ['leads:read', 'leads:read_all', 'leads:create', 'leads:update', 'leads:delete', 'leads:assign', 'students:read', 'reports:read', 'approvals:act', 'whatsapp:send'],
   },
-  { key: 'counselor', name: 'Counselor', permissions: ['leads:read', 'leads:create', 'leads:update', 'students:read', 'reports:read', 'whatsapp:send'] },
+  // C8: counselors see only students converted from their own leads (students:read_own). Granting
+  // students:read instead widens this to all students — a management decision (SRS 6.12 "R").
+  { key: 'counselor', name: 'Counselor', permissions: ['leads:read', 'leads:create', 'leads:update', 'students:read_own', 'reports:read', 'whatsapp:send'] },
   { key: 'finance_manager', name: 'Finance Manager', permissions: ['finance:read', 'finance:collect', 'finance:manage', 'students:read', 'reports:read', 'approvals:act', 'whatsapp:send'] },
   { key: 'finance_staff', name: 'Finance Staff', permissions: ['finance:read', 'finance:collect', 'students:read', 'reports:read', 'whatsapp:send'] },
   {
@@ -41,6 +44,18 @@ export const DEFAULT_ROLES: { key: string; name: string; permissions: Permission
   { key: 'exam_officer', name: 'Examination Officer', permissions: ['exams:read', 'exams:manage', 'students:read', 'reports:read', 'approvals:act', 'whatsapp:send'] },
   { key: 'student', name: 'Student', permissions: ['portal:student'] },
 ];
+
+/**
+ * Roles that only a Super Administrator may grant or revoke, and whose grant needs a second Super Admin's
+ * approval (SRS §9 Rules, 22.2). The same roles must use MFA (SEC-06).
+ */
+export const PRIVILEGED_ROLES = ['super_admin', 'admin', 'management', 'finance_manager', 'finance_staff'] as const;
+/** SEC-06 plus management decision 3 (2026-11-05): Sales Managers and Examination Officers must also use MFA. */
+export const MFA_REQUIRED_ROLES = [...PRIVILEGED_ROLES, 'sales_manager', 'exam_officer'] as const;
+export const isPrivilegedRole = (key: string) => (PRIVILEGED_ROLES as readonly string[]).includes(key);
+
+/** Valid permission keys that may be stored on a role or as a user override ('*' is reserved for super_admin). */
+export const isKnownPermission = (p: string) => p in PERMISSIONS || p === 'portal:student';
 
 export function hasPerm(perms: string[], p: string) {
   return perms.includes('*') || perms.includes(p);

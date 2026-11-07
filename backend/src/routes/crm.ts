@@ -23,6 +23,13 @@ const CLOSED: LeadStatus[] = ['ADMITTED', 'NOT_INTERESTED', 'LOST', 'JUNK'];
 function scope(req: Request): Prisma.LeadWhereInput {
   return userCan(req, 'leads:read_all') ? {} : { ownerId: req.user!.id };
 }
+/** API-08: counselors may act only on applications of their own leads. */
+async function scopedApplication(req: Request, id: string) {
+  const a = await prisma.application.findUnique({ where: { id }, include: { lead: { select: { ownerId: true } } } });
+  if (!a || (!userCan(req, 'leads:read_all') && !userCan(req, 'students:manage') && a.lead?.ownerId !== req.user!.id)) throw notFound('Application not found');
+  const { lead: _lead, ...rest } = a;
+  return rest;
+}
 async function getScopedLead(req: Request, id: string) {
   const lead = await prisma.lead.findFirst({ where: { id, ...scope(req) } });
   if (!lead) throw notFound('Lead not found or not assigned to you.');
@@ -114,6 +121,7 @@ r.get('/leads', can('leads:read'), ah(async (req, res) => {
   const orderBy = ['createdAt', 'name', 'lastActivityAt', 'nextFollowUpAt', 'status'].includes(sort) ? { [sort]: dir } : { createdAt: 'desc' as const };
   if (req.query.format === 'csv') {
     const all = await prisma.lead.findMany({ where, orderBy, take: 10000, include: { owner: { select: { name: true } }, course: { select: { name: true } } } });
+    await audit(prisma, req, 'EXPORT', 'lead', null, null, { format: 'csv', rows: all.length, filters: req.query }); // RPT-08
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="leads.csv"');
     return res.send(toCsv(all.map((l) => ({ code: l.code, name: l.name, phone: l.phone, email: l.email, course: l.course?.name, source: l.source, status: l.status, owner: l.owner?.name, created: l.createdAt, nextFollowUp: l.nextFollowUpAt }))));
@@ -139,9 +147,10 @@ r.post('/leads', can('leads:create'), ah(async (req, res) => {
   const lead = await prisma.$transaction(async (tx) => {
     const dup = await findDuplicateLead(tx, d.phone, d.email);
     if (dup) throw conflict(`A lead with this phone or email already exists (${dup.code} — ${dup.name}, owner: ${dup.owner?.name ?? 'unassigned'}).`, { id: dup.id, code: dup.code });
-    return createLead(tx, d, req.user!.id);
+    const lead = await createLead(tx, d, req.user!.id);
+    await audit(tx, req, 'CREATE', 'lead', lead.id, null, d);
+    return lead;
   });
-  await audit(req, 'CREATE', 'lead', lead.id, null, d);
   res.status(201).json(lead);
 }));
 
@@ -167,16 +176,19 @@ r.get('/leads/:id', can('leads:read'), ah(async (req, res) => {
 r.patch('/leads/:id', can('leads:update'), ah(async (req, res) => {
   const before = await getScopedLead(req, req.params.id);
   const d = leadInput.omit({ ownerId: true }).partial().parse(req.body);
-  const lead = await prisma.lead.update({
-    where: { id: before.id },
-    data: {
-      ...d,
-      email: d.email === '' ? null : d.email,
-      ...(d.phone && { phoneNormalized: normalizePhone(d.phone) }),
-      ...(d.email !== undefined && { emailNormalized: normalizeEmail(d.email) }),
-    },
+  const lead = await prisma.$transaction(async (tx) => {
+    const lead = await tx.lead.update({
+      where: { id: before.id },
+      data: {
+        ...d,
+        email: d.email === '' ? null : d.email,
+        ...(d.phone && { phoneNormalized: normalizePhone(d.phone) }),
+        ...(d.email !== undefined && { emailNormalized: normalizeEmail(d.email) }),
+      },
+    });
+    await audit(tx, req, 'UPDATE', 'lead', lead.id, before, d);
+    return lead;
   });
-  await audit(req, 'UPDATE', 'lead', lead.id, before, d);
   res.json(lead);
 }));
 
@@ -187,27 +199,28 @@ r.post('/leads/:id/status', can('leads:update'), ah(async (req, res) => {
   if (status === 'ADMITTED') throw badRequest('Leads become Admitted only through the admission approval.');
   if (['LOST', 'JUNK', 'NOT_INTERESTED'].includes(status) && !reason?.trim()) throw badRequest('Please select a reason to close this lead.');
   if (lead.status === 'ADMITTED') throw badRequest('This lead has already been admitted.');
-  await prisma.$transaction([
-    prisma.lead.update({ where: { id: lead.id }, data: { status, closeReason: reason ?? null, lastActivityAt: new Date(), ...(CLOSED.includes(status) && { nextFollowUpAt: null }) } }),
-    prisma.leadActivity.create({ data: { leadId: lead.id, type: 'STATUS', content: `${lead.status} → ${status}${reason ? ` (${reason})` : ''}`, userId: req.user!.id } }),
-    ...(CLOSED.includes(status) ? [prisma.followUp.updateMany({ where: { leadId: lead.id, status: 'PENDING' }, data: { status: 'CANCELLED' } })] : []),
-  ]);
-  await audit(req, 'STATUS', 'lead', lead.id, { status: lead.status }, { status, reason });
+  await prisma.$transaction(async (tx) => {
+    await tx.lead.update({ where: { id: lead.id }, data: { status, closeReason: reason ?? null, lastActivityAt: new Date(), ...(CLOSED.includes(status) && { nextFollowUpAt: null }) } });
+    await tx.leadActivity.create({ data: { leadId: lead.id, type: 'STATUS', content: `${lead.status} → ${status}${reason ? ` (${reason})` : ''}`, userId: req.user!.id } });
+    if (CLOSED.includes(status)) await tx.followUp.updateMany({ where: { leadId: lead.id, status: 'PENDING' }, data: { status: 'CANCELLED' } });
+    await audit(tx, req, 'STATUS', 'lead', lead.id, { status: lead.status }, { status, reason });
+  });
   res.json({ ok: true });
 }));
 
 // CRM-15 single / bulk reassignment with reason and history
 r.post('/leads/assign', can('leads:assign'), ah(async (req, res) => {
   const { leadIds, ownerId, reason } = z.object({ leadIds: z.array(z.string()).min(1).max(500), ownerId: z.string(), reason: z.string().min(2) }).parse(req.body);
-  const owner = await prisma.user.findFirst({ where: { id: ownerId, isActive: true } });
-  if (!owner) throw badRequest('Selected counselor is not active.');
+  // Leads may only be owned by active CRM staff (not students or unrelated roles).
+  const owner = await prisma.user.findFirst({ where: { id: ownerId, isActive: true, roles: { some: { role: { key: { in: ['counselor', 'sales_manager'] } } } } } });
+  if (!owner) throw badRequest('Selected counselor is not an active counselor or sales manager.');
   const leads = await prisma.lead.findMany({ where: { id: { in: leadIds } }, select: { id: true, ownerId: true } });
-  await prisma.$transaction([
-    prisma.lead.updateMany({ where: { id: { in: leadIds } }, data: { ownerId } }),
-    prisma.leadActivity.createMany({ data: leads.map((l) => ({ leadId: l.id, type: 'ASSIGNMENT', content: `Reassigned to ${owner.name}: ${reason}`, userId: req.user!.id, meta: { from: l.ownerId, to: ownerId } })) }),
-    prisma.followUp.updateMany({ where: { leadId: { in: leadIds }, status: 'PENDING' }, data: { userId: ownerId } }),
-  ]);
-  await audit(req, 'ASSIGN', 'lead', null, null, { leadIds, ownerId, reason });
+  await prisma.$transaction(async (tx) => {
+    await tx.lead.updateMany({ where: { id: { in: leadIds } }, data: { ownerId } });
+    await tx.leadActivity.createMany({ data: leads.map((l) => ({ leadId: l.id, type: 'ASSIGNMENT', content: `Reassigned to ${owner.name}: ${reason}`, userId: req.user!.id, meta: { from: l.ownerId, to: ownerId } })) });
+    await tx.followUp.updateMany({ where: { leadId: { in: leadIds }, status: 'PENDING' }, data: { userId: ownerId } });
+    await audit(tx, req, 'ASSIGN', 'lead', null, leads, { leadIds, ownerId, reason });
+  });
   await notifyUser(ownerId, `${leads.length} lead(s) assigned to you`, reason, '/staff/leads');
   res.json({ updated: leads.length });
 }));
@@ -297,14 +310,15 @@ r.post('/leads/import', can('leads:create'), ah(async (req, res) => {
           return;
         }
         if (!userCan(req, 'leads:assign')) parsed.data.ownerId = req.user!.id;
-        await createLead(tx, parsed.data, req.user!.id);
+        const lead = await createLead(tx, parsed.data, req.user!.id);
+        await audit(tx, req, 'CREATE', 'lead', lead.id, null, { ...parsed.data, via: 'import' });
         report.push({ row: i + 2, status: 'created' });
       });
     } catch (e: any) {
       report.push({ row: i + 2, status: 'error', message: e.message });
     }
   }
-  await audit(req, 'IMPORT', 'lead', null, null, { rows: rows.length, created: report.filter((x) => x.status === 'created').length });
+  await audit(prisma, req, 'IMPORT', 'lead', null, null, { rows: rows.length, created: report.filter((x) => x.status === 'created').length });
   res.json({ report, summary: report.reduce((a: any, x) => ((a[x.status] = (a[x.status] ?? 0) + 1), a), {}) });
 }));
 
@@ -315,21 +329,24 @@ r.post('/leads/:id/merge', can('leads:delete'), ah(async (req, res) => {
   const [keep, dup] = await Promise.all([prisma.lead.findUniqueOrThrow({ where: { id: req.params.id } }), prisma.lead.findUniqueOrThrow({ where: { id: duplicateId } })]);
   if (dup.studentId) throw badRequest('An admitted lead cannot be merged away.');
   await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`ALTER TABLE lead_activities DISABLE TRIGGER lead_activities_immutable`;
-    await tx.leadActivity.updateMany({ where: { leadId: dup.id }, data: { leadId: keep.id } });
-    await tx.$executeRaw`ALTER TABLE lead_activities ENABLE TRIGGER lead_activities_immutable`;
+    // Communication history is append-only (CRM-10, LOG-01): copy the duplicate's timeline onto the kept lead
+    // instead of moving rows (the old code disabled the immutability trigger to do that).
+    const history = await tx.leadActivity.findMany({ where: { leadId: dup.id }, orderBy: { createdAt: 'asc' } });
+    if (history.length)
+      await tx.leadActivity.createMany({ data: history.map((h) => ({ leadId: keep.id, type: h.type, direction: h.direction, content: h.content, outcome: h.outcome, nextStep: h.nextStep, userId: h.userId, createdAt: h.createdAt, meta: { ...((h.meta as object) ?? {}), mergedFrom: dup.code, originalId: h.id } })) });
     await tx.followUp.updateMany({ where: { leadId: dup.id }, data: { leadId: keep.id } });
     await tx.counsellingSession.updateMany({ where: { leadId: dup.id }, data: { leadId: keep.id } });
     await tx.application.updateMany({ where: { leadId: dup.id }, data: { leadId: keep.id } });
     await tx.lead.update({ where: { id: dup.id }, data: { status: 'JUNK', closeReason: `Merged into ${keep.code}` } });
     await tx.leadActivity.create({ data: { leadId: keep.id, type: 'SYSTEM', content: `Merged duplicate ${dup.code}`, userId: req.user!.id } });
+    await audit(tx, req, 'MERGE', 'lead', keep.id, dup, { into: keep.id });
   });
-  await audit(req, 'MERGE', 'lead', keep.id, dup, { into: keep.id });
   res.json({ ok: true });
 }));
 
 // ── Applications (CRM-12) ──
-r.get('/applications', can('leads:read', 'students:read'), ah(async (req, res) => {
+// SRS 6.12: CRM data (applications) is not for Finance/Academic/Exam roles.
+r.get('/applications', can('leads:read', 'students:manage'), ah(async (req, res) => {
   const { skip, take, page, pageSize } = paging(req.query);
   const where: Prisma.ApplicationWhereInput = {
     ...(req.query.status && { status: String(req.query.status) as any }),
@@ -344,7 +361,7 @@ r.get('/applications', can('leads:read', 'students:read'), ah(async (req, res) =
   res.json({ items: items.map((a) => ({ ...a, courseName: cn[a.courseId] })), total, page, pageSize });
 }));
 
-r.get('/applications/:id', can('leads:read', 'students:read'), ah(async (req, res) => {
+r.get('/applications/:id', can('leads:read', 'students:manage'), ah(async (req, res) => {
   const a = await prisma.application.findUnique({ where: { id: req.params.id }, include: { lead: { select: { id: true, code: true, name: true, ownerId: true } }, documents: true } });
   if (!a) throw notFound('Application not found');
   if (!userCan(req, 'leads:read_all') && !userCan(req, 'students:manage') && a.lead?.ownerId !== req.user!.id) throw forbidden();
@@ -359,30 +376,33 @@ r.post('/leads/:id/application', can('leads:update'), ah(async (req, res) => {
   if (data.preferences.batchId) await assertBatchAvailable(prisma, data.preferences.batchId, data.preferences.courseId);
   const s = await getSettings();
   const app = await prisma.$transaction(async (tx) => {
-    const code = await nextNumber(`application:${new Date().getFullYear()}`, s.ids.application, tx);
+    const code = await nextNumber('application:{year}', s.ids.application, tx);
     const app = await tx.application.create({ data: { code, leadId: lead.id, courseId: data.preferences.courseId, batchId: data.preferences.batchId || null, data: data as any, status: 'UNDER_REVIEW' } });
     await tx.lead.update({ where: { id: lead.id }, data: { status: 'APPLICATION', courseId: data.preferences.courseId, lastActivityAt: new Date() } });
     await tx.leadActivity.create({ data: { leadId: lead.id, type: 'STATUS', content: `${lead.status} → APPLICATION (${code})`, userId: req.user!.id } });
+    await audit(tx, req, 'CREATE', 'application', app.id, null, { leadId: lead.id, code });
     return app;
   });
-  await audit(req, 'CREATE', 'application', app.id, null, { leadId: lead.id });
   res.status(201).json(app);
 }));
 
 r.patch('/applications/:id', can('leads:update', 'students:manage'), ah(async (req, res) => {
-  const a = await prisma.application.findUniqueOrThrow({ where: { id: req.params.id } });
+  const a = await scopedApplication(req, req.params.id);
   if (['ADMITTED', 'PENDING_APPROVAL'].includes(a.status)) throw badRequest('This application can no longer be edited.');
   const d = z.object({ data: applicationDataSchema.optional(), status: z.enum(['UNDER_REVIEW', 'REJECTED']).optional(), remarks: z.string().optional() }).parse(req.body);
   if (d.data) validateApplicationData(d.data);
-  const u = await prisma.application.update({ where: { id: a.id }, data: { ...(d.data && { data: d.data as any, courseId: d.data.preferences.courseId, batchId: d.data.preferences.batchId || null }), status: d.status, remarks: d.remarks } });
-  await audit(req, 'UPDATE', 'application', a.id, a, d);
+  const u = await prisma.$transaction(async (tx) => {
+    const u = await tx.application.update({ where: { id: a.id }, data: { ...(d.data && { data: d.data as any, courseId: d.data.preferences.courseId, batchId: d.data.preferences.batchId || null }), status: d.status, remarks: d.remarks } });
+    await audit(tx, req, 'UPDATE', 'application', a.id, a, d);
+    return u;
+  });
   res.json(u);
 }));
 
 // CRM-13: request admission → Sales Manager approval → student created automatically
 r.post('/applications/:id/admit', can('leads:update', 'students:manage'), ah(async (req, res) => {
   const { batchId, installments } = z.object({ batchId: z.string().optional().nullable(), installments: z.number().int().min(1).max(24).optional() }).parse(req.body);
-  const a = await prisma.application.findUniqueOrThrow({ where: { id: req.params.id } });
+  const a = await scopedApplication(req, req.params.id);
   if (!['SUBMITTED', 'UNDER_REVIEW', 'APPROVED'].includes(a.status)) throw badRequest(`Application is ${a.status.toLowerCase().replace('_', ' ')}.`);
   const data = applicationDataSchema.parse(a.data);
   await assertNoDuplicateStudent(prisma, data.personal.phone, data.personal.email);
@@ -391,9 +411,10 @@ r.post('/applications/:id/admit', can('leads:update', 'students:manage'), ah(asy
   await assertBatchAvailable(prisma, bId, a.courseId);
   const approval = await prisma.$transaction(async (tx) => {
     await tx.application.update({ where: { id: a.id }, data: { status: 'PENDING_APPROVAL', batchId: bId } });
-    return createApproval(tx, { type: 'ADMISSION', entityType: 'application', entityId: a.id, title: `Admission: ${data.personal.fullName} (${a.code})`, payload: { batchId: bId, installments }, requestedById: req.user!.id });
+    const approval = await createApproval(tx, { type: 'ADMISSION', entityType: 'application', entityId: a.id, title: `Admission: ${data.personal.fullName} (${a.code})`, payload: { batchId: bId, installments }, requestedById: req.user!.id });
+    await audit(tx, req, 'REQUEST_ADMISSION', 'application', a.id, { status: a.status }, { status: 'PENDING_APPROVAL', batchId: bId, installments, approvalId: approval.id });
+    return approval;
   });
-  await audit(req, 'REQUEST_ADMISSION', 'application', a.id, null, { batchId: bId, installments, approvalId: approval.id });
   res.json({ approval, message: approval.status === 'APPROVED' ? 'Student admitted.' : 'Admission sent for approval.' });
 }));
 

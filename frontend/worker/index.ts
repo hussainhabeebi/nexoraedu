@@ -22,10 +22,10 @@ async function proxy(request: Request, env: Env): Promise<Response> {
   if (ip) headers.set('X-Forwarded-For', ip);
   headers.delete('X-Client-IP');
   headers.delete('X-Proxy-Secret');
-  if (ip && env.PROXY_SECRET) {
-    // Backend trusts X-Client-IP only with the shared secret (rate limiting, audit IPs).
-    headers.set('X-Client-IP', ip);
+  if (env.PROXY_SECRET) {
+    // The backend (staging/production) refuses requests without this secret, and trusts X-Client-IP only with it.
     headers.set('X-Proxy-Secret', env.PROXY_SECRET);
+    if (ip) headers.set('X-Client-IP', ip);
   }
   try {
     return await fetch(target.toString(), {

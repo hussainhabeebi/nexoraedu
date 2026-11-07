@@ -28,21 +28,24 @@ export function paging(q: Record<string, unknown>) {
   return { page, pageSize, skip: (page - 1) * pageSize, take: pageSize };
 }
 
+/** Uniform error format {code, message, details, ref} where ref = X-Request-Id (API-02, UI-23/24). */
 export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction) {
+  const ref = req.id ?? crypto.randomUUID();
   if (err instanceof ZodError) {
     return res.status(422).json({
-      error: { code: 'VALIDATION', message: 'Please correct the highlighted fields.', fields: err.flatten().fieldErrors },
+      error: { code: 'VALIDATION', message: 'Please correct the highlighted fields.', fields: err.flatten().fieldErrors, ref },
     });
   }
   if (err instanceof HttpError) {
-    return res.status(err.status).json({ error: { code: err.code, message: err.message, details: err.details } });
+    return res.status(err.status).json({ error: { code: err.code, message: err.message, details: err.details, ref } });
   }
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
     if (err.code === 'P2002')
-      return res.status(409).json({ error: { code: 'DUPLICATE', message: `A record with this ${(err.meta?.target as string[] | undefined)?.join(', ') ?? 'value'} already exists.` } });
-    if (err.code === 'P2025') return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Record not found.' } });
+      return res.status(409).json({ error: { code: 'DUPLICATE', message: `A record with this ${(err.meta?.target as string[] | undefined)?.join(', ') ?? 'value'} already exists.`, ref } });
+    if (err.code === 'P2025') return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Record not found.', ref } });
   }
-  const ref = crypto.randomBytes(4).toString('hex').toUpperCase();
-  console.error(`[error ${ref}]`, req.method, req.originalUrl, err);
+  if ((err as any)?.type === 'entity.parse.failed') return res.status(400).json({ error: { code: 'BAD_JSON', message: 'The request body is not valid JSON.', ref } });
+  // Path only (no query string) so secrets never land in error logs.
+  console.error(`[error ${ref}]`, req.method, String(req.originalUrl).split('?')[0], err);
   res.status(500).json({ error: { code: 'INTERNAL', message: `Something went wrong. Please try again or contact support with reference ${ref}.`, ref } });
 }

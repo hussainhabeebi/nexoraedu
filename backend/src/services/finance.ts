@@ -5,8 +5,13 @@ import { badRequest, conflict, notFound } from '../lib/http';
 import { nextNumber } from '../lib/sequence';
 import { getSettings } from '../lib/settings';
 import { money } from '../lib/util';
+import { addMonthsClamped, endOfDayUtc, parseIsoDate, toCalendarDate, type CalendarDate } from '../lib/caldate';
 
 type Tx = Prisma.TransactionClient;
+
+/** Installments that still carry an unpaid amount. SUPERSEDED ones (replaced by a custom plan) and PAID ones never do. */
+export const OPEN_INSTALLMENT_STATUSES = ['DUE', 'PARTIAL'];
+export const openInstallment = { in: OPEN_INSTALLMENT_STATUSES };
 
 export async function ledger(tx: Tx, e: { studentId: string; type: string; debit?: number; credit?: number; refType?: string; refId?: string; narration: string; userId?: string }) {
   return tx.ledgerEntry.create({ data: { ...e, debit: e.debit ?? 0, credit: e.credit ?? 0 } });
@@ -17,42 +22,83 @@ export async function studentBalance(studentId: string, tx: Tx = prisma) {
   return money(Number(agg._sum.debit ?? 0) - Number(agg._sum.credit ?? 0));
 }
 
-/** FIN-02/03: build a fee plan from the course fee structure, split into installments, invoice each. */
-export async function createFeePlan(tx: Tx, p: { studentId: string; courseId: string; installments?: number; startDate?: Date; userId?: string }) {
-  const comps = await tx.feeComponent.findMany({ where: { courseId: p.courseId, isActive: true, effectiveFrom: { lte: new Date() } } });
+/** Integer paise arithmetic for splitting amounts (no floating-point drift). */
+const toPaise = (n: number) => Math.round(n * 100);
+const fromPaise = (p: number) => p / 100;
+
+/**
+ * FIN-03 installment schedule (pure, unit-tested):
+ *  - the first installment is due on the start date (a calendar date in the academy zone);
+ *  - installment n is due n months later on the same day-of-month, clamped to the month's last day
+ *    ("anchor day, clamped": 31 Jan → 28/29 Feb → 31 Mar …, never rolling into the next month);
+ *  - each due date is the END of that calendar day in the academy zone, stored in UTC;
+ *  - amounts are split in whole paise; the last installment absorbs the remainder.
+ */
+export function buildInstallmentSchedule(grossAmount: number, count: number, start: CalendarDate, timeZone: string) {
+  const n = Math.max(1, Math.floor(count));
+  const total = toPaise(grossAmount);
+  const base = Math.floor(total / n);
+  return Array.from({ length: n }, (_, i) => {
+    const date = addMonthsClamped(start, i, start.d);
+    return { seq: i + 1, amount: fromPaise(i === n - 1 ? total - base * (n - 1) : base), calendarDate: date, dueDate: endOfDayUtc(date, timeZone) };
+  });
+}
+
+/** Start date for a plan: an ISO calendar date ("YYYY-MM-DD") is taken as-is; an instant is converted to the academy zone. */
+export function planStartDate(input: Date | string | undefined, timeZone: string): CalendarDate {
+  if (typeof input === 'string') {
+    const c = parseIsoDate(input);
+    if (!c) throw badRequest('Start date must be a valid date (YYYY-MM-DD).');
+    return c;
+  }
+  return toCalendarDate(input ?? new Date(), timeZone);
+}
+
+/** FIN-01: the course's current fee components (with tax) and their gross total, as a new plan would bill them. */
+export async function courseFee(tx: Tx, courseId: string) {
+  const comps = await tx.feeComponent.findMany({ where: { courseId, isActive: true, effectiveFrom: { lte: new Date() } } });
   const components = comps.map((c) => {
     const tax = money((Number(c.amount) * Number(c.taxPercent)) / 100);
     return { name: c.name, amount: Number(c.amount), tax, total: money(Number(c.amount) + tax) };
   });
-  const gross = money(components.reduce((s, c) => s + c.total, 0));
+  return { components, gross: fromPaise(components.reduce((s, c) => s + toPaise(c.total), 0)) };
+}
+
+/** FIN-02/03: build a fee plan from the course fee structure, split into installments, invoice each. */
+export async function createFeePlan(tx: Tx, p: { studentId: string; courseId: string; installments?: number; startDate?: Date | string; userId?: string; enrollmentId?: string | null }) {
+  const { components, gross } = await courseFee(tx, p.courseId);
   const course = await tx.course.findUniqueOrThrow({ where: { id: p.courseId } });
-  const n = Math.max(1, p.installments ?? course.defaultInstallments);
-  const start = p.startDate ?? new Date();
-  const base = Math.floor((gross / n) * 100) / 100;
-  const plan = await tx.feePlan.create({ data: { studentId: p.studentId, courseId: p.courseId, grossAmount: gross, components } });
   const s = await getSettings();
-  for (let i = 0; i < n; i++) {
-    const amount = i === n - 1 ? money(gross - base * (n - 1)) : base;
-    const due = new Date(start);
-    due.setMonth(due.getMonth() + i);
-    due.setHours(23, 59, 59, 0);
-    const inst = await tx.installment.create({ data: { feePlanId: plan.id, seq: i + 1, amount, dueDate: due } });
-    const number = await nextNumber(`invoice:${new Date().getFullYear()}`, s.ids.invoice, tx);
-    await tx.invoice.create({ data: { number, studentId: p.studentId, feePlanId: plan.id, installmentId: inst.id, amount, dueDate: due } });
+  const tz = s.academy.timeZone;
+  const start = planStartDate(p.startDate, tz);
+  const schedule = buildInstallmentSchedule(gross, p.installments ?? course.defaultInstallments, start, tz);
+  // Link to the enrollment being billed: given explicitly, else the student's current enrollment in this course.
+  const enrollmentId = p.enrollmentId ?? (await tx.enrollment.findFirst({ where: { studentId: p.studentId, courseId: p.courseId, status: { in: ['ACTIVE', 'ON_HOLD'] } }, select: { id: true } }))?.id ?? null;
+  const plan = await tx.feePlan.create({ data: { studentId: p.studentId, courseId: p.courseId, grossAmount: gross, components, dueAnchorDay: start.d, dueTimeZone: tz, enrollmentId } });
+  for (const it of schedule) {
+    const inst = await tx.installment.create({ data: { feePlanId: plan.id, seq: it.seq, amount: it.amount, dueDate: it.dueDate } });
+    const number = await nextNumber('invoice:{year}', s.ids.invoice, tx);
+    await tx.invoice.create({ data: { number, studentId: p.studentId, feePlanId: plan.id, installmentId: inst.id, amount: it.amount, dueDate: it.dueDate } });
   }
   if (gross > 0) await ledger(tx, { studentId: p.studentId, type: 'FEE', debit: gross, refType: 'fee_plan', refId: plan.id, narration: `Course fee — ${course.name}`, userId: p.userId });
   return plan;
 }
 
 export async function outstandingInstallments(tx: Tx, studentId: string) {
-  return tx.installment.findMany({ where: { feePlan: { studentId }, status: { not: 'PAID' } }, orderBy: [{ dueDate: 'asc' }, { seq: 'asc' }] });
+  return tx.installment.findMany({ where: { feePlan: { studentId }, status: openInstallment }, orderBy: [{ dueDate: 'asc' }, { seq: 'asc' }] });
 }
 
 /** FIN-05/06: record a payment, allocate FIFO to installments, post ledger, issue receipt number. */
+/** Serialises all money movements on one student account (FIN-05/13, 8.4): prevents parallel overpayment. */
+export async function lockStudentAccount(tx: Tx, studentId: string) {
+  await tx.$queryRaw`SELECT id FROM students WHERE id = ${studentId} FOR UPDATE`;
+}
+
 export async function recordPayment(
   tx: Tx,
   p: { studentId: string; amount: number; mode: string; reference?: string; payer?: string; paidAt?: Date; idempotencyKey?: string; gatewayRef?: string; userId?: string },
 ) {
+  await lockStudentAccount(tx, p.studentId);
   if (p.idempotencyKey) {
     const dup = await tx.payment.findUnique({ where: { idempotencyKey: p.idempotencyKey } });
     if (dup) return dup;
@@ -63,7 +109,7 @@ export async function recordPayment(
   const due = money(insts.reduce((s, i) => s + Number(i.amount) - Number(i.paidAmount), 0));
   if (amount > due + 0.001) throw conflict(`Amount exceeds the outstanding balance of ${due.toFixed(2)}.`);
   const s = await getSettings();
-  const receiptNumber = await nextNumber(`receipt:${new Date().getFullYear()}`, s.ids.receipt, tx);
+  const receiptNumber = await nextNumber('receipt:{year}', s.ids.receipt, tx);
   const payment = await tx.payment.create({
     data: { receiptNumber, studentId: p.studentId, amount, mode: p.mode, reference: p.reference, payer: p.payer, paidAt: p.paidAt ?? new Date(), idempotencyKey: p.idempotencyKey, gatewayRef: p.gatewayRef, recordedById: p.userId },
   });
@@ -82,11 +128,32 @@ export async function recordPayment(
   return payment;
 }
 
+/** Refunds that still count against money received (R8): requested, approved or paid. */
+export const ACTIVE_REFUND_STATUSES = ['PENDING_APPROVAL', 'APPROVED', 'PAID'];
+
+/**
+ * B1 / R8 (FIN-06, FIN-11, 22.5): a receipt may be cancelled only if the refunds that are pending, approved or paid
+ * stay covered by the receipts that remain. Call with the student account locked.
+ */
+export async function assertCancellationKeepsRefundsCovered(tx: Tx, pay: { id: string; studentId: string; receiptNumber: string }) {
+  const [remaining, refunds] = await Promise.all([
+    tx.payment.aggregate({ where: { studentId: pay.studentId, id: { not: pay.id }, status: { not: 'CANCELLED' } }, _sum: { amount: true } }),
+    tx.refund.aggregate({ where: { studentId: pay.studentId, status: { in: ACTIVE_REFUND_STATUSES } }, _sum: { amount: true } }),
+  ]);
+  const left = money(Number(remaining._sum.amount ?? 0));
+  const refunded = money(Number(refunds._sum.amount ?? 0));
+  if (refunded > left + 0.001)
+    throw conflict(`Receipt ${pay.receiptNumber} cannot be cancelled: refunds of ${refunded.toFixed(2)} (pending, approved or paid) would exceed the ${left.toFixed(2)} left in other receipts. Resolve the refund first.`, { refunds: refunded, remainingReceipts: left });
+}
+
 /** Executed after PAYMENT_CANCELLATION approval: reverse allocations + reversing ledger entry. */
 export async function cancelPayment(tx: Tx, paymentId: string, userId: string) {
   const pay = await tx.payment.findUnique({ where: { id: paymentId }, include: { allocations: true } });
   if (!pay) throw notFound('Payment not found');
+  await lockStudentAccount(tx, pay.studentId);
   if (pay.status === 'CANCELLED') return;
+  // Re-checked at approval time: a refund may have been recorded since the request (nothing changes if refused).
+  await assertCancellationKeepsRefundsCovered(tx, pay);
   for (const a of pay.allocations) {
     const i = await tx.installment.findUniqueOrThrow({ where: { id: a.installmentId } });
     const paid = money(Number(i.paidAmount) - Number(a.amount));
@@ -100,6 +167,7 @@ export async function cancelPayment(tx: Tx, paymentId: string, userId: string) {
 /** Executed after DISCOUNT approval: reduce installments from the last one backwards, post credit. */
 export async function applyDiscount(tx: Tx, discountId: string, userId: string) {
   const d = await tx.discount.findUniqueOrThrow({ where: { id: discountId } });
+  await lockStudentAccount(tx, d.studentId);
   if (d.status === 'APPLIED') return;
   let left = Number(d.amount);
   const insts = await tx.installment.findMany({ where: { feePlanId: d.feePlanId }, orderBy: { seq: 'desc' } });

@@ -78,8 +78,10 @@ cd backend
 cp .env.example .env                                   # adjust DATABASE_URL etc.
 npm install
 npx prisma migrate deploy                              # schema + immutability triggers
-npm run db:seed                                        # roles, masters, courses, templates, workflows, demo data
-npm run dev                                            # http://localhost:4000  (Swagger: /api/docs)
+npm run db:seed:reference                              # roles, masters, templates, workflows (no users)
+APP_ENV=development npm run db:seed:demo               # optional synthetic demo data; prints one-time passwords
+npm run admin:bootstrap:dev -- --email you@example.org --name "Your Name" --username you   # first Super Admin (activation link)
+npm run dev                                            # http://localhost:4000  (Swagger: /api/docs, development only)
 
 # 3. Web
 cd ../frontend
@@ -87,10 +89,17 @@ npm install
 npm run dev                                            # http://localhost:5173  (proxies /api to :4000)
 ```
 
-### Demo accounts (password `Admin@12345`; set `SEED_ADMIN_PASSWORD` / `SEED_DEMO=false` in production)
+### Accounts
+No account or password is ever seeded. The first Super Administrator is created with `npm run admin:bootstrap`
+(single-use 60-minute activation link; the owner sets a policy-compliant password and must then enrol an
+authenticator app). A second named Super Administrator is created with `--second` (needed because privileged
+role grants require approval by another Super Administrator). Privileged roles (Super Admin, Administrator,
+Management, Finance) must use MFA.
+
+Demo data (`db:seed:demo`, refused in production) creates these synthetic users with random one-time passwords
+and `@example.invalid` emails:
 | Username | Role |
 |---|---|
-| `admin` | Super Administrator |
 | `director` | Management |
 | `office` | Administrator |
 | `salesmgr` | Sales Manager |
@@ -100,11 +109,16 @@ npm run dev                                            # http://localhost:5173  
 | `faculty1`, `faculty2` | Faculty |
 | `examofficer` | Examination Officer |
 
-Students get their login (Student ID, e.g. `nxa-2026-00001`, plus a temporary password) on WhatsApp/email when they are admitted. They must change the password at first sign-in.
+Students get their login (Student ID, e.g. `nxa-2026-00001`, plus a temporary password) on WhatsApp/email when they are admitted. They must change the password at first sign-in (enforced by the API).
+
+Existing installations created with the old seed: run `npm run accounts:legacy` (dry run) to find the old
+default `admin / Admin@12345` and demo accounts, then `-- --apply` (after approval) to deactivate them.
+Staging/production refuse to start while such accounts are active.
 
 ### Tests
 ```bash
-cd backend && npm test      # uses TEST_DATABASE_URL (default: postgres nexora_test); resets it each run
+cd backend && npm test      # TEST_DATABASE_URL (default: local postgres nexora_test, owner must have CREATEROLE); resets it each run
+                            # tests connect as a restricted role created from prisma/sql/app-role.sql
 ```
 The end-to-end suite covers: auth and RBAC, duplicate detection, lost-reason enforcement, online application with a document upload (and the under-18 guardian rule), the admission approval chain (including no self-approval), fee plan maths, idempotent payments, overpayment blocking, ledger immutability, payment cancellation with reversal, the online exam (answers hidden, auto-grading, attempt limit, unpublished results hidden), role-specific dashboards, the append-only audit log, and the inbound Chatwoot webhook creating a lead.
 
@@ -143,11 +157,14 @@ After the first deploy go to Worker → Settings:
    cp deploy/.env.cloudflare.example deploy/.env   # secrets, tunnel token, PROXY_SECRET, Chatwoot
    docker compose -f deploy/docker-compose.cloudflare.yml --env-file deploy/.env up -d --build
    ```
-   The API runs migrations and the seed on start. Check it with `https://nexoraed.com/health`.
+   Then run the release step and create the first Super Administrator (the API no longer migrates or seeds on start):
+   `docker compose -f deploy/docker-compose.cloudflare.yml --env-file deploy/.env run --rm api npm run release` and
+   `… run --rm api npm run admin:bootstrap -- --email … --name … --username …`.
+   Recommended: run the API as the restricted DB role from `backend/prisma/sql/app-role.sql`.
    To update: `git pull && docker compose -f deploy/docker-compose.cloudflare.yml --env-file deploy/.env up -d --build`.
 
 **3. Go-live checklist**
-- Sign in as `admin` with `SEED_ADMIN_PASSWORD` and change the password.
+- Open the activation link from `admin:bootstrap`, set a password and enrol MFA.
 - Settings → General: academy phone, WhatsApp number and address.
 - Settings → WhatsApp: Account ID, inbox ID, token → Test connection. Then add the webhook in Chatwoot.
 - Create staff users. Review courses, fees and batches.
@@ -160,11 +177,11 @@ GitHub Actions (`.github/workflows/deploy.yml`) runs the backend tests and the f
 cp backend/.env.example .env
 # set: JWT_SECRET, APP_ENCRYPTION_KEY (openssl rand -hex 32), POSTGRES_PASSWORD,
 #      PUBLIC_APP_URL=https://nexoraed.com, API_BASE_URL=https://nexoraed.com,
-#      CORS_ORIGINS=https://nexoraed.com, CHATWOOT_* (optional), SMTP_* (optional),
-#      SEED_ADMIN_PASSWORD, SEED_DEMO=false
+#      CORS_ORIGINS=https://nexoraed.com, CHATWOOT_* (optional), SMTP_* (optional), APP_ENV=production,
+#      PROXY_SECRET (or REQUIRE_PROXY_SECRET=false when nginx in this compose file is the only entry point)
 docker compose up -d --build        # web on :8080 → put behind TLS (Caddy / nginx / Cloudflare)
 ```
-- The API container runs `prisma migrate deploy` and the (idempotent) seed on start.
+- Run `docker compose run --rm api npm run release` (migrations + reference data) before starting the API; it never seeds users.
 - Back up the `pgdata` and `uploads` volumes. The SRS targets daily full backups plus PITR (BKP-01); use your managed Postgres or `pg_dump` with WAL archiving.
 - Website / landing-page forms can push leads to `POST /api/v1/webhooks/website-leads` with the header `X-API-Key: $WEBSITE_LEADS_API_KEY`.
 - Payment gateways can confirm payments at `POST /api/v1/webhooks/payment`, signed with `HMAC-SHA256(PAYMENT_WEBHOOK_SECRET, "<timestamp>.<raw body>")` in `X-Signature` and the timestamp in `X-Timestamp`.
@@ -172,15 +189,17 @@ docker compose up -d --build        # web on :8080 → put behind TLS (Caddy / n
 ---
 
 ## Security & data integrity (SRS §18, §20, §24)
-- JWT access tokens (15 min) with rotating refresh tokens. Account lock after failed logins. Generic login errors. Idle sign-out after 30 min. Forced password change on first login.
-- RBAC on every API route, plus object-level scoping: counselors see only their own leads, faculty only their batches' students, students only their own records.
+- Server-side sessions: short-lived access tokens held in memory, refresh token only in an HttpOnly/Secure/SameSite=Strict cookie with rotation and reuse detection; server-side idle timeout; users can view and end sessions. Deactivation, role and password changes apply on the next request.
+- MFA (TOTP authenticator + recovery codes), mandatory for Super Admin, Administrator, Management and Finance roles.
+- Password policy: ≥10 characters, 3 character classes, common/personal passwords blocked, last 5 not reusable, bcrypt cost 12. Account lock after failed logins with identical generic errors. Forced password change enforced by the API.
+- RBAC on every API route, plus object-level scoping (`src/lib/policy.ts`): counselors see only their own leads and the students converted from them, faculty only their batches, students only their own records; identity documents only for administrators, the owning counselor and admission reviewers.
+- Only a Super Administrator manages privileged accounts; privileged role grants need a second Super Administrator's approval; nobody changes their own roles. Approvals fail closed and nobody approves their own request.
 - Rate limiting (global, auth and public forms). Helmet headers. zod validation on every input. Parameterised queries (Prisma). CSV-injection guard on exports.
-- **PostgreSQL triggers make `audit_logs`, `ledger_entries`, `lead_activities` and `student_history` append-only.** Corrections are reversing entries.
+- **Audit rows are written in the same transaction as the change.** PostgreSQL triggers plus a restricted runtime role (`prisma/sql/app-role.sql`) make `audit_logs`, `ledger_entries`, `lead_activities`, `student_history`, `login_logs`, `approval_actions` and `integration_logs` append-only. Corrections are reversing entries. Viewing logs and exporting data are themselves audited.
 - Integration credentials are encrypted at rest (AES-256-GCM). Every Chatwoot call is logged in `integration_logs`. Webhooks are verified (token, or HMAC signature plus timestamp).
-- Uploads: type and size limits, random file names, documents served only through authenticated endpoints.
+- Uploads: type, size and content-signature checks, random file names; documents and student photos served only through authenticated, scoped endpoints.
 
 ## Not yet included / next steps
-- **MFA** (FR-AUTH-03, should-have) — next on the security list
 - A **live payment gateway** checkout: the webhook and reconciliation are ready; the provider (Razorpay / PayU) needs to be chosen
 - **SMS gateway** adapter (the notification engine supports adding channels)
 - Scheduled e-mailing of reports, saved filters and dashboard widget re-ordering (should/could items)

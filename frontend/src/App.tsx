@@ -1,7 +1,7 @@
 import React, { lazy, Suspense, type ReactNode } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
-import { useAuth } from './lib/auth';
-import { PageLoader } from './components/ui';
+import { pendingStep, useAuth } from './lib/auth';
+import { PageLoader, Spinner } from './components/ui';
 import PublicLayout from './components/PublicLayout';
 import StaffLayout from './components/StaffLayout';
 import StudentLayout from './components/StudentLayout';
@@ -21,6 +21,8 @@ const Login = L(() => import('./pages/auth/Login'));
 const Forgot = L(() => import('./pages/auth/Forgot'));
 const Reset = L(() => import('./pages/auth/Reset'));
 const ChangePassword = L(() => import('./pages/auth/ChangePassword'));
+const MfaSetup = L(() => import('./pages/auth/MfaSetup'));
+const Security = L(() => import('./pages/auth/Security'));
 // Staff
 const Dashboard = L(() => import('./pages/staff/Dashboard'));
 const Leads = L(() => import('./pages/staff/Leads'));
@@ -60,10 +62,13 @@ const SLearning = L(() => import('./pages/student/Learning'));
 const SProfile = L(() => import('./pages/student/Profile'));
 
 function RequireAuth({ children, student, perm, anyPortal }: { children: ReactNode; student?: boolean; perm?: string[]; anyPortal?: boolean }) {
-  const { user, can } = useAuth();
+  const { user, can, ready } = useAuth();
   const loc = useLocation();
+  if (!ready) return <div className="flex min-h-screen items-center justify-center"><Spinner className="h-6 w-6" /></div>;
   if (!user) return <Navigate to={student ? '/student/login' : '/login'} state={{ from: loc.pathname }} replace />;
-  if (user.mustChangePassword && loc.pathname !== '/change-password') return <Navigate to="/change-password" replace />;
+  // Forced password change, then mandatory MFA enrolment, before anything else (the API enforces the same).
+  const step = pendingStep(user);
+  if (step && loc.pathname !== step) return <Navigate to={step} replace />;
   if (anyPortal) return <>{children}</>;
   const isStudent = user.roles.includes('student') && user.roles.length === 1;
   if (student && !isStudent) return <Navigate to="/staff" replace />;
@@ -92,6 +97,8 @@ export default function App() {
         <Route path="forgot-password" element={<Forgot />} />
         <Route path="reset-password" element={<Reset />} />
         <Route path="change-password" element={<RequireAuth anyPortal><ChangePassword /></RequireAuth>} />
+        <Route path="mfa-setup" element={<RequireAuth anyPortal><MfaSetup /></RequireAuth>} />
+        <Route path="security" element={<RequireAuth anyPortal><Security /></RequireAuth>} />
 
         <Route path="staff" element={<RequireAuth><StaffLayout /></RequireAuth>}>
           <Route index element={<Navigate to="dashboard" replace />} />
@@ -99,11 +106,11 @@ export default function App() {
           <Route path="leads" element={P(['leads:read'], <Leads />)} />
           <Route path="leads/:id" element={P(['leads:read'], <LeadDetail />)} />
           <Route path="follow-ups" element={P(['leads:read'], <FollowUps />)} />
-          <Route path="applications" element={P(['leads:read', 'students:read'], <Applications />)} />
-          <Route path="applications/:id" element={P(['leads:read', 'students:read'], <ApplicationDetail />)} />
-          <Route path="students" element={P(['students:read', 'students:read_batch'], <Students />)} />
+          <Route path="applications" element={P(['leads:read', 'students:manage'], <Applications />)} />
+          <Route path="applications/:id" element={P(['leads:read', 'students:manage'], <ApplicationDetail />)} />
+          <Route path="students" element={P(['students:read', 'students:read_batch', 'students:read_own'], <Students />)} />
           <Route path="students/new" element={P(['students:manage'], <StudentNew />)} />
-          <Route path="students/:id" element={P(['students:read', 'students:read_batch'], <StudentProfile />)} />
+          <Route path="students/:id" element={P(['students:read', 'students:read_batch', 'students:read_own'], <StudentProfile />)} />
           <Route path="documents" element={P(['documents:verify'], <Documents />)} />
           <Route path="finance/*" element={P(['finance:read'], <Finance />)} />
           <Route path="courses" element={P(['academics:read', 'masters:manage'], <Courses2 />)} />
