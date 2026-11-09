@@ -8,3 +8,8 @@ frontend/dist/
 coverage/
 deploy/.env
 .wrangler/
+
+# Cloudflare local-only variables and generated files
+.dev.vars
+backend/.test-d1/
+backend/src/generated/

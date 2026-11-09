@@ -56,9 +56,10 @@ const R = (p: number) => (p / 100).toFixed(2);
 export async function reconcile(opts: { studentId?: string } = {}) {
   const st = await getSettings();
   const academyTz = st.academy.timeZone;
-  return prisma.$transaction(
-    async (tx) => {
-      await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+  // D1 has no read-only snapshot transaction: the reads below are separate queries. A write that commits
+  // between them could show a momentary mismatch, so any failing check is re-run once and only issues that are
+  // still present are reported. (Each write itself is atomic, so a half-written change is never visible.)
+  const run = async (tx: typeof prisma) => {
       const sw = opts.studentId ? { studentId: opts.studentId } : {};
       const [plans, installments, invoices, payments, allocations, discounts, refunds, ledger, adjustments, enrollments] = await Promise.all([
         tx.feePlan.findMany({ where: sw, select: { id: true, studentId: true, grossAmount: true, discount: true, waived: true, dueAnchorDay: true, dueTimeZone: true, enrollmentId: true } }),
@@ -265,7 +266,7 @@ export async function reconcile(opts: { studentId?: string } = {}) {
         byRule,
         issues,
       };
-    },
-    { isolationLevel: 'RepeatableRead', timeout: 120_000 },
-  );
+  };
+  const first = await run(prisma);
+  return first.ok ? first : run(prisma);
 }

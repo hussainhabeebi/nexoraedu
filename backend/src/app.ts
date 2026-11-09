@@ -4,13 +4,12 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 import crypto from 'crypto';
-import fs from 'fs';
-import swaggerUi from 'swagger-ui-express';
 import { config, isHardened } from './config';
 import { ah, errorHandler, HttpError, notFound } from './lib/http';
 import { authenticate, can, requireCompleteSession } from './lib/auth';
 import { prisma } from './lib/prisma';
-import { storedPath } from './lib/upload';
+import { sendStoredFile } from './lib/upload';
+import { InstanceMemoryStore } from './lib/rate-store';
 import { canAccessStudent } from './lib/policy';
 import { registerHandlers } from './services/handlers';
 import { openapi } from './openapi';
@@ -28,12 +27,6 @@ import webhookRoutes from './routes/webhooks';
 import dashboardRoutes from './routes/dashboard';
 import publicRoutes from './routes/public';
 import portalRoutes from './routes/portal';
-
-const safeEq = (a: string, b: string) => {
-  const x = Buffer.from(a);
-  const y = Buffer.from(b);
-  return x.length === y.length && crypto.timingSafeEqual(x, y);
-};
 
 /** Path without query string, so secrets in query parameters never reach access logs (LOG-02). */
 morgan.token('path', (req: any) => String(req.originalUrl || req.url).split('?')[0]);
@@ -54,15 +47,11 @@ export function createApp() {
     next();
   });
 
-  // Real client IP only from the authenticated Worker proxy; in staging/production direct access is refused (S17).
+  // Real client IP from Cloudflare's CF-Connecting-IP only (set by the edge; X-Forwarded-For / X-Client-IP from
+  // the client are ignored). The API is served by the same Worker as the site, so there is no separate origin (S17).
   app.use((req, _res, next) => {
-    const fromProxy = !!config.proxySecret && safeEq(req.get('x-proxy-secret') ?? '', config.proxySecret);
-    if (fromProxy) {
-      const ip = req.get('x-client-ip');
-      if (ip) Object.defineProperty(req, 'ip', { value: ip, configurable: true });
-    } else if (config.requireProxySecret && req.path !== '/health') {
-      return next(new HttpError(403, 'Direct access is not allowed.', 'PROXY_REQUIRED'));
-    }
+    const ip = config.trustCfConnectingIp ? req.get('cf-connecting-ip') : undefined;
+    Object.defineProperty(req, 'ip', { value: ip || (config.trustCfConnectingIp ? 'unknown' : req.socket?.remoteAddress ?? 'unknown'), configurable: true });
     next();
   });
 
@@ -72,7 +61,7 @@ export function createApp() {
   if (config.appEnv !== 'test') app.use(morgan(LOG_FORMAT));
 
   // API-06 rate limiting per IP (auth endpoints have stricter limits)
-  app.use('/api/', rateLimit({ windowMs: 60_000, limit: Number(process.env.API_RATE_LIMIT || 600), standardHeaders: true, legacyHeaders: false, message: { error: { code: 'RATE_LIMIT', message: 'Too many requests. Please slow down.' } } }));
+  app.use('/api/', rateLimit({ windowMs: 60_000, limit: Number(process.env.API_RATE_LIMIT || 600), standardHeaders: true, legacyHeaders: false, store: new InstanceMemoryStore(), message: { error: { code: 'RATE_LIMIT', message: 'Too many requests. Please slow down.' } } }));
 
   app.get('/health', ah(async (_req, res) => {
     await prisma.$queryRaw`SELECT 1`;
@@ -80,7 +69,8 @@ export function createApp() {
   }));
   if (config.enableApiDocs) {
     app.get('/api/v1/openapi.json', (_req, res) => res.json(openapi));
-    app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openapi));
+    // Swagger UI reads its files from disk, which a Worker does not have: the spec itself is served instead.
+    app.get('/api/docs', (_req, res) => res.redirect('/api/v1/openapi.json'));
   }
 
   const v1 = express.Router();
@@ -97,10 +87,10 @@ export function createApp() {
     const name = req.params.name;
     const st = await prisma.student.findFirst({ where: { photoUrl: `/api/v1/files/${name}` }, select: { id: true } });
     if (!st || !(req.user!.studentId === st.id || (await canAccessStudent(req.user!, st.id)))) throw notFound();
-    const p = storedPath(name);
-    if (!fs.existsSync(p)) throw notFound();
     res.setHeader('Cache-Control', 'private, max-age=300');
-    res.sendFile(p);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Type', /\.png$/.test(name) ? 'image/png' : /\.webp$/.test(name) ? 'image/webp' : /\.pdf$/.test(name) ? 'application/pdf' : 'image/jpeg');
+    if (!(await sendStoredFile(res, name))) throw notFound();
   }));
 
   v1.use('/admin', adminRoutes);
@@ -119,6 +109,5 @@ export function createApp() {
 
   app.use((_req, _res, next) => next(notFound('The requested resource was not found.')));
   app.use(errorHandler);
-  if (isHardened && !config.proxySecret && config.requireProxySecret) console.warn('PROXY_SECRET is not set: all API requests will be refused.');
   return app;
 }

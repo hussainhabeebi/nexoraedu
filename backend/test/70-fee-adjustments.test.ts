@@ -298,7 +298,7 @@ describe('Access control', () => {
   });
 
   it('the API database role cannot delete fee adjustments', async () => {
-    await expect(prisma.$executeRawUnsafe('DELETE FROM fee_adjustments WHERE false')).rejects.toThrow(/permission denied/);
+    await expect(prisma.$executeRawUnsafe('DELETE FROM fee_adjustments')).rejects.toThrow(/never deleted/);
   });
 });
 

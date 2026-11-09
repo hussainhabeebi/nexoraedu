@@ -7,6 +7,7 @@ import { prisma } from '../lib/prisma';
 import { config } from '../config';
 import { render } from '../lib/util';
 import { sendWhatsApp } from './chatwoot';
+import { background } from '../lib/background';
 
 export type Channel = 'IN_APP' | 'EMAIL' | 'WHATSAPP';
 
@@ -38,7 +39,7 @@ export async function notify(templateKey: string, to: Recipient, vars: Record<st
   if (!tpl || !tpl.isActive) return;
   const body = render(tpl.body, vars);
   const subject = render(tpl.subject || tpl.name, vars);
-  const channels = (opts.channels ?? (tpl.channels as Channel[])).filter((c) => tpl.channels.includes(c) && !(opts.sensitive && c === 'IN_APP'));
+  const channels = (opts.channels ?? (tpl.channels as Channel[])).filter((c) => (tpl.channels as Channel[]).includes(c) && !(opts.sensitive && c === 'IN_APP'));
   const results: Record<string, string> = {};
   const logBody = opts.sensitive ? `[redacted: ${templateKey} contains a single-use link]` : body;
 
@@ -82,7 +83,7 @@ export async function notify(templateKey: string, to: Recipient, vars: Record<st
 
 /** Fire-and-forget wrapper so business transactions never fail because of a gateway. */
 export function notifyLater(...args: Parameters<typeof notify>) {
-  setImmediate(() => notify(...args).catch((e) => console.error('notify failed', e)));
+  background(() => notify(...args).catch((e) => console.error('notify failed', e)));
 }
 
 /** In-app notification to every active user holding a role. */

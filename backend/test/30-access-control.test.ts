@@ -8,6 +8,10 @@ import fs from 'fs';
 import path from 'path';
 import { app, as, makeStudent, makeUser, prisma, sessionFor } from './helpers';
 import { config } from '../src/config';
+import { putFile } from '../src/lib/files';
+
+const DOC_NAME = 'a'.repeat(32) + '.pdf';
+const PHOTO_NAME = 'b'.repeat(32) + '.png';
 
 let saA: string, saB: string, adminTok: string, saAId: string, saBId: string;
 beforeAll(async () => {
@@ -109,13 +113,12 @@ describe('R5 object-level scoping', () => {
     [c1, c2, fac] = await Promise.all([sessionFor('counselor1'), sessionFor('counselor2'), sessionFor('faculty2')]);
     const st = await makeStudent({ ownerId: counselor1.id, batchId: null });
     studentId = st.id;
-    const dir = path.resolve(config.uploadDir);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'scopetest-id.pdf'), '%PDF-1.4 synthetic');
-    fs.writeFileSync(path.join(dir, 'scopetest-photo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]));
-    photoName = 'scopetest-photo.png';
+    // Fixture files in the (local) private R2 bucket, under the same random-style names the upload handler uses.
+    await putFile(DOC_NAME, new TextEncoder().encode('%PDF-1.4 synthetic'), 'application/pdf');
+    await putFile(PHOTO_NAME, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]), 'image/png');
+    photoName = PHOTO_NAME;
     await prisma.student.update({ where: { id: st.id }, data: { photoUrl: `/api/v1/files/${photoName}` } });
-    docId = (await prisma.document.create({ data: { studentId: st.id, type: 'id_proof', fileName: 'id.pdf', storagePath: 'scopetest-id.pdf', mimeType: 'application/pdf', size: 18 } })).id;
+    docId = (await prisma.document.create({ data: { studentId: st.id, type: 'id_proof', fileName: 'id.pdf', storagePath: DOC_NAME, mimeType: 'application/pdf', size: 18 } })).id;
   });
 
   it('SEC-T14 identity documents: Administration staff and Super Admin only (decision 2)', async () => {
@@ -155,39 +158,34 @@ describe('R5 object-level scoping', () => {
   });
 
   it('SEC-T16 uploads whose content does not match the declared type are rejected and deleted', async () => {
-    const dir = path.resolve(config.uploadDir);
-    const before = fs.readdirSync(dir).length;
+    const bucket = (globalThis as any).__NEXORA_ENV__.FILES;
+    const before = (await bucket.list()).objects.length;
     const r = await request(app).post(`/api/v1/students/${studentId}/documents`).set(as(adminTok)).field('type', 'id_proof')
       .attach('file', Buffer.from('MZ\x90\x00 this is not a pdf'), { filename: 'id.pdf', contentType: 'application/pdf' });
     expect(r.status).toBe(400);
-    expect(fs.readdirSync(dir).length).toBe(before);
+    expect((await bucket.list()).objects.length).toBe(before); // nothing stored
     const ok = await request(app).post(`/api/v1/students/${studentId}/documents`).set(as(adminTok)).field('type', 'id_proof')
       .attach('file', Buffer.from('%PDF-1.7 synthetic'), { filename: 'id.pdf', contentType: 'application/pdf' });
     expect(ok.status).toBe(201);
   });
 
-  it('SEC-T16b content check: declared types resolve only to real signatures; files outside the upload folder are refused', async () => {
-    const { fileMatchesType } = await import('../src/lib/upload');
-    const dir = path.resolve(config.uploadDir);
-    const f = path.join(dir, `sniff-${Date.now()}.pdf`);
-    fs.writeFileSync(f, '%PDF-1.7 synthetic');
-    try {
-      expect(fileMatchesType(f, 'application/pdf')).toBe(true);
-      // Built-in object property names must never act as a signature check (CodeQL unvalidated dynamic call).
-      for (const t of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) expect(fileMatchesType(f, t), t).toBe(false);
-      // A path outside the upload directory is refused before any file is opened (CodeQL path injection).
-      expect(() => fileMatchesType(path.join(dir, '..', 'package.json'), 'application/pdf')).toThrow(/Invalid upload path/);
-      expect(() => fileMatchesType('/etc/hostname', 'application/pdf')).toThrow(/Invalid upload path/);
-    } finally {
-      fs.rmSync(f, { force: true });
-    }
+  it('SEC-T16b content check: declared types resolve only to real signatures; stored names are never paths', async () => {
+    const { bufferMatchesType, storedName } = await import('../src/lib/upload');
+    const pdf = Buffer.from('%PDF-1.7 synthetic');
+    expect(bufferMatchesType(pdf, 'application/pdf')).toBe(true);
+    // Built-in object property names must never act as a signature check (CodeQL unvalidated dynamic call).
+    for (const t of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) expect(bufferMatchesType(pdf, t), t).toBe(false);
+    // Only generated names are accepted: no paths, no traversal (CodeQL path injection).
+    for (const bad of ['../package.json', '/etc/hostname', 'scopetest-id.pdf', 'a/b.pdf', '..', ''])
+      expect(() => storedName(bad), bad).toThrow(/Invalid file reference/);
+    expect(storedName(DOC_NAME)).toBe(DOC_NAME);
   });
 
   it('SEC-T17 photos need sign-in and scope; answer keys hidden from non-exam-managers', async () => {
     expect((await request(app).get(`/api/v1/files/${photoName}`)).status).toBe(401);
     expect((await request(app).get(`/api/v1/files/${photoName}`).set(as(c2))).status).toBe(404);
     expect((await request(app).get(`/api/v1/files/${photoName}`).set(as(c1))).status).toBe(200);
-    expect((await request(app).get('/api/v1/files/scopetest-id.pdf').set(as(adminTok))).status).toBe(404); // documents never via /files
+    expect((await request(app).get(`/api/v1/files/${DOC_NAME}`).set(as(adminTok))).status).toBe(404); // documents never via /files
     const exOff = await sessionFor('examofficer');
     const courseId = (await prisma.course.findFirstOrThrow({ where: { code: 'FSD' } })).id;
     await request(app).post('/api/v1/exams/questions').set(as(exOff)).send({ courseId, type: 'MCQ_SINGLE', text: 'Scope test?', options: ['a', 'b'], correct: 'a', marks: 1 });

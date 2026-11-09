@@ -2,7 +2,7 @@
  * Object-level authorization (R5; FR-AZ-02, API-08, FR-DOC-02, DSH-09, SRS 6.12).
  * Route guards (`can(...)`) decide WHAT a user may do; these helpers decide WHICH records.
  */
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '#prisma';
 import type { AuthUser } from './auth';
 import { hasPerm } from './permissions';
 import { prisma } from './prisma';

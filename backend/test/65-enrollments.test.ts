@@ -6,6 +6,7 @@ import request from 'supertest';
 import { app, as, makeStudent, makeUser, prisma, sessionFor } from './helpers';
 import { openEnrollment } from '../src/services/enrollments';
 import { reconcile } from '../src/services/reconciliation';
+import { atomic } from '../src/lib/db';
 
 let sa: string, office: string, sales: string, couns: string, acad: string, fin: string, accounts: string, fac: string;
 let fsdCourseId: string, fsdBatches: string[], dmCourseId: string, dmBatch: string;
@@ -198,23 +199,23 @@ describe('Status changes, withdrawal, re-activation, cancellation (STU-13)', () 
 describe('Duplicate prevention (one current enrollment per student)', () => {
   it('service, database index and constraints all refuse invalid states', async () => {
     const st = await makeStudent({ batchId: fsdBatches[0] });
-    await expect(prisma.$transaction((tx) => openEnrollment(tx, { studentId: st.id, courseId: dmCourseId, batchId: dmBatch, source: 'DIRECT' }))).rejects.toThrow(/already has a current enrollment/);
+    await expect(atomic((tx) => openEnrollment(tx, { studentId: st.id, courseId: dmCourseId, batchId: dmBatch, source: 'DIRECT' }))).rejects.toThrow(/already has a current enrollment/);
     await expect(prisma.enrollment.create({ data: { studentId: st.id, courseId: dmCourseId, batchId: dmBatch, status: 'ON_HOLD', source: 'DIRECT' } })).rejects.toThrow(); // partial unique index
     await expect(prisma.enrollment.create({ data: { studentId: st.id, courseId: dmCourseId, status: 'PAUSED', source: 'DIRECT' } })).rejects.toThrow(); // status CHECK
     await expect(prisma.enrollment.create({ data: { studentId: st.id, courseId: dmCourseId, status: 'COMPLETED', source: 'DIRECT' } })).rejects.toThrow(); // closed needs endedAt
-    await expect(prisma.enrollment.deleteMany({ where: { studentId: st.id } })).rejects.toThrow(/permission denied/); // history never deleted
+    await expect(prisma.enrollment.deleteMany({ where: { studentId: st.id } })).rejects.toThrow(/never deleted/); // history never deleted
     expect(await prisma.enrollment.count({ where: { studentId: st.id } })).toBe(1);
   });
 
   it('parallel transfer approvals cannot create two current enrollments', async () => {
     const st = await makeStudent({ batchId: fsdBatches[0] });
     const [e] = await enrollmentsOf(st.id);
-    const out = await Promise.allSettled([1, 2].map(() => prisma.$transaction((tx) => openEnrollment(tx, { studentId: st.id, courseId: dmCourseId, batchId: dmBatch, source: 'DIRECT' }))));
+    const out = await Promise.allSettled([1, 2].map(() => atomic((tx) => openEnrollment(tx, { studentId: st.id, courseId: dmCourseId, batchId: dmBatch, source: 'DIRECT' }))));
     expect(out.every((o) => o.status === 'rejected')).toBe(true);
-    await prisma.$transaction(async (tx) => {
+    await atomic(async (tx) => {
       await tx.enrollment.update({ where: { id: e.id }, data: { status: 'TRANSFERRED', endedAt: new Date() } });
     });
-    const two = await Promise.allSettled([1, 2].map(() => prisma.$transaction((tx) => openEnrollment(tx, { studentId: st.id, courseId: dmCourseId, batchId: dmBatch, source: 'TRANSFER' }))));
+    const two = await Promise.allSettled([1, 2].map(() => atomic((tx) => openEnrollment(tx, { studentId: st.id, courseId: dmCourseId, batchId: dmBatch, source: 'TRANSFER' }))));
     expect(two.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
     expect(await prisma.enrollment.count({ where: { studentId: st.id, status: { in: ['ACTIVE', 'ON_HOLD'] } } })).toBe(1);
   });

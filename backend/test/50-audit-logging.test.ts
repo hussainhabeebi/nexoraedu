@@ -8,12 +8,13 @@ import morgan from 'morgan';
 import { app, as, prisma, sessionFor, makeUser } from './helpers';
 import { audit } from '../src/lib/audit';
 import { config } from '../src/config';
+import { atomic } from '../src/lib/db';
 
 describe('SEC-T25 audit rows are part of the business transaction', () => {
   it('if the audit write fails, the business change is rolled back', async () => {
     const code = `rollback_${Date.now()}`;
     await expect(
-      prisma.$transaction(async (tx) => {
+      atomic(async (tx) => {
         await tx.masterItem.create({ data: { type: 'city', code, label: 'Rollback test' } });
         await audit(tx, null, 'CREATE', 'master', 'x', null, { bad: BigInt(1) as any }); // not serialisable → throws
       }),
@@ -31,16 +32,17 @@ describe('SEC-T25 audit rows are part of the business transaction', () => {
   });
 });
 
-describe('SEC-T26 the runtime database role cannot rewrite history', () => {
-  it('UPDATE/DELETE/TRUNCATE on append-only tables are refused by privileges (not only triggers)', async () => {
-    for (const t of ['audit_logs', 'ledger_entries', 'approval_actions', 'login_logs', 'lead_activities', 'student_history']) {
-      await expect(prisma.$executeRawUnsafe(`UPDATE "${t}" SET "createdAt" = "createdAt"`), t).rejects.toThrow(/permission denied/);
-      await expect(prisma.$executeRawUnsafe(`DELETE FROM "${t}"`), t).rejects.toThrow(/permission denied/);
+describe('SEC-T26 history cannot be rewritten (append-only tables)', () => {
+  // D1 has no database users/GRANTs: append-only is enforced by triggers on every history table (migrations/0002).
+  const TABLES = ['audit_logs', 'ledger_entries', 'approval_actions', 'login_logs', 'lead_activities', 'student_history', 'integration_logs'];
+  it('UPDATE and DELETE on append-only tables are refused by the database', async () => {
+    await prisma.loginLog.create({ data: { event: 'TEST', identifier: 'append-only-probe', success: true } });
+    for (const t of TABLES) {
+      await expect(prisma.$executeRawUnsafe(`UPDATE "${t}" SET "createdAt" = "createdAt"`), t).rejects.toThrow(/append-only/);
+      await expect(prisma.$executeRawUnsafe(`DELETE FROM "${t}"`), t).rejects.toThrow(/append-only/);
     }
-    await expect(prisma.$executeRawUnsafe('ALTER TABLE audit_logs DISABLE TRIGGER audit_logs_immutable')).rejects.toThrow(/must be owner|permission denied/);
-    await expect(prisma.$executeRawUnsafe('CREATE TABLE evil (id int)')).rejects.toThrow(/permission denied/);
-    const who = await prisma.$queryRawUnsafe<{ u: string }[]>('SELECT current_user AS u');
-    expect(who[0].u).toBe('nexora_app_test');
+    const triggers = await prisma.$queryRawUnsafe<{ name: string }[]>(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE '%_immutable_%'`);
+    for (const t of TABLES) for (const op of ['update', 'delete']) expect(triggers.map((x) => x.name)).toContain(`${t}_immutable_${op}`);
   });
 });
 
@@ -78,25 +80,16 @@ describe('SEC-T28/T29 log hygiene and proxy enforcement', () => {
     expect(path).toBe('/api/v1/webhooks/chatwoot');
   });
 
-  it('with REQUIRE_PROXY_SECRET, direct API calls are refused and spoofed IP headers are ignored', async () => {
-    const saved = { require: config.requireProxySecret, secret: config.proxySecret };
-    config.requireProxySecret = true;
-    config.proxySecret = 'proxy-secret-for-tests-0123456789';
+  it('on Cloudflare the client IP comes only from CF-Connecting-IP; spoofed IP headers are ignored', async () => {
+    const saved = config.trustCfConnectingIp;
+    config.trustCfConnectingIp = true;
     try {
-      const direct = await request(app).get('/api/v1/public/site');
-      expect(direct.status).toBe(403);
-      expect(direct.body.error.code).toBe('PROXY_REQUIRED');
-      expect((await request(app).get('/health')).status).toBe(200); // container health check
-      const viaProxy = await request(app).get('/api/v1/public/site').set('X-Proxy-Secret', config.proxySecret);
-      expect(viaProxy.status).toBe(200);
-      await request(app).post('/api/v1/auth/login').set('X-Proxy-Secret', config.proxySecret).set('X-Forwarded-For', '6.6.6.6').send({ identifier: 'ip-spoof-test', password: 'x' });
+      expect((await request(app).get('/health')).status).toBe(200);
+      await request(app).post('/api/v1/auth/login').set('CF-Connecting-IP', '198.51.100.7').set('X-Forwarded-For', '6.6.6.6').set('X-Client-IP', '6.6.6.7').send({ identifier: 'ip-spoof-test', password: 'x' });
       const log = await prisma.loginLog.findFirstOrThrow({ where: { identifier: 'ip-spoof-test' }, orderBy: { createdAt: 'desc' } });
-      expect(log.ip).not.toBe('6.6.6.6');
-      await request(app).post('/api/v1/auth/login').set('X-Proxy-Secret', config.proxySecret).set('X-Client-IP', '203.0.113.9').send({ identifier: 'ip-proxy-test', password: 'x' });
-      expect((await prisma.loginLog.findFirstOrThrow({ where: { identifier: 'ip-proxy-test' } })).ip).toBe('203.0.113.9');
+      expect(log.ip).toBe('198.51.100.7');
     } finally {
-      config.requireProxySecret = saved.require;
-      config.proxySecret = saved.secret;
+      config.trustCfConnectingIp = saved;
     }
   });
 });

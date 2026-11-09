@@ -1,6 +1,7 @@
 /** Public website API (no auth): course catalogue, enquiry, online registration/application, status, certificate verification. */
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
+import { D1Store } from '../lib/rate-store';
 import path from 'path';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
@@ -8,13 +9,14 @@ import { ah, badRequest, notFound } from '../lib/http';
 import { getSettings } from '../lib/settings';
 import { nextNumber } from '../lib/sequence';
 import { normalizePhone } from '../lib/util';
-import { upload } from '../lib/upload';
+import { upload, verifyUploads } from '../lib/upload';
 import { applicationDataSchema, assertBatchAvailable, validateApplicationData } from '../services/admissions';
 import { notifyLater } from '../services/notify';
 import { createLead, findDuplicateLead } from './crm';
+import { atomic } from '../lib/db';
 
 const r = Router();
-const formLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: { code: 'RATE_LIMIT', message: 'Too many submissions. Please try again later.' } } });
+const formLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, store: new D1Store('form:'), message: { error: { code: 'RATE_LIMIT', message: 'Too many submissions. Please try again later.' } } });
 
 const publicCourse = {
   id: true, code: true, name: true, slug: true, category: true, summary: true, description: true, durationMonths: true, eligibility: true, mode: true, imageUrl: true, highlights: true, defaultInstallments: true,
@@ -50,14 +52,14 @@ r.post('/enquiry', formLimiter, ah(async (req, res) => {
     await prisma.leadActivity.create({ data: { leadId: dup.id, type: 'SYSTEM', content: `Repeat website enquiry: ${d.message ?? ''}` } });
     if (dup.ownerId) await prisma.notification.create({ data: { userId: dup.ownerId, title: 'Repeat enquiry', body: `${dup.name} enquired again on the website`, link: `/staff/leads/${dup.id}` } });
   } else {
-    await prisma.$transaction((tx) => createLead(tx, { name: d.name, phone: d.phone, email: d.email || null, courseId: d.courseId || null, source: 'website', notes: d.message }));
+    await atomic((tx) => createLead(tx, { name: d.name, phone: d.phone, email: d.email || null, courseId: d.courseId || null, source: 'website', notes: d.message }));
   }
   notifyLater('enquiry.received', { name: d.name, phone: d.phone, email: d.email || null }, { name: d.name }, { channels: ['WHATSAPP', 'EMAIL'] });
   res.status(201).json({ ok: true, message: 'Thank you! Our counselor will contact you shortly.' });
 }));
 
 /** Online student registration (multi-step form). multipart: data=<json>, files[] + fileTypes[] */
-r.post('/applications', formLimiter, upload.array('files', 8), ah(async (req, res) => {
+r.post('/applications', formLimiter, upload.array('files', 8), verifyUploads, ah(async (req, res) => {
   let raw: unknown;
   try {
     raw = JSON.parse(String(req.body.data || '{}'));
@@ -75,12 +77,12 @@ r.post('/applications', formLimiter, upload.array('files', 8), ah(async (req, re
   const existingApp = await prisma.application.findFirst({ where: { status: { in: ['SUBMITTED', 'UNDER_REVIEW', 'PENDING_APPROVAL'] }, lead: { phoneNormalized: normalizePhone(data.personal.phone) }, courseId: course.id } });
   if (existingApp) throw badRequest(`You already have an application in progress (${existingApp.code}). Use “Track application” to check its status.`);
   const s = await getSettings();
-  const app = await prisma.$transaction(async (tx) => {
+  const app = await atomic(async (tx) => {
     let lead = await findDuplicateLead(tx, data.personal.phone, data.personal.email);
     if (!lead) lead = (await createLead(tx, { name: data.personal.fullName, phone: data.personal.phone, email: data.personal.email, courseId: course.id, source: 'website', city: data.personal.city }, undefined)) as any;
     const code = await nextNumber('application:{year}', s.ids.application, tx);
     const app = await tx.application.create({ data: { code, leadId: lead!.id, courseId: course.id, batchId: data.preferences.batchId || null, data: data as any, status: 'SUBMITTED', source: 'website' } });
-    if (files.length) await tx.document.createMany({ data: files.map((f, i) => ({ applicationId: app.id, type: types[i] || 'other', fileName: f.originalname, storagePath: path.basename(f.path), mimeType: f.mimetype, size: f.size })) });
+    if (files.length) await tx.document.createMany({ data: files.map((f, i) => ({ applicationId: app.id, type: types[i] || 'other', fileName: f.originalname, storagePath: f.filename, mimeType: f.mimetype, size: f.size })) });
     await tx.lead.update({ where: { id: lead!.id }, data: { status: 'APPLICATION', courseId: course.id, lastActivityAt: new Date() } });
     await tx.leadActivity.create({ data: { leadId: lead!.id, type: 'STATUS', content: `Online application submitted (${code})` } });
     if (lead!.ownerId) await tx.notification.create({ data: { userId: lead!.ownerId, title: 'New online application', body: `${data.personal.fullName} applied for ${course.name} (${code})`, link: `/staff/applications/${app.id}` } });

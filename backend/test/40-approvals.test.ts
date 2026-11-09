@@ -6,6 +6,7 @@ import request from 'supertest';
 import { app, as, makeStudent, makeUser, prisma, sessionFor } from './helpers';
 import { createApproval } from '../src/services/approvals';
 import { createFeePlan } from '../src/services/finance';
+import { atomic } from '../src/lib/db';
 
 let sa: string, acad: string, accounts: string, finmgr: string, director: string, c2: string;
 let studentId: string, toBatchId: string;
@@ -14,7 +15,7 @@ beforeAll(async () => {
   [sa, acad, accounts, finmgr, director, c2] = await Promise.all([sessionFor(s.username), sessionFor('acadmgr'), sessionFor('accounts'), sessionFor('finmgr'), sessionFor('director'), sessionFor('counselor2')]);
   const st = await makeStudent({});
   studentId = st.id;
-  await prisma.$transaction((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 1 }));
+  await atomic((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 1 }));
   toBatchId = (await prisma.batch.findFirstOrThrow({ where: { courseId: st.courseId, NOT: { id: st.batchId! } } })).id;
 });
 
@@ -33,10 +34,10 @@ describe('SEC-T10 missing or disabled workflow ⇒ request refused, nothing chan
     }
   });
   it('unknown type / no applicable levels', async () => {
-    await expect(prisma.$transaction((tx) => createApproval(tx, { type: 'DISCOUNT_AUTO', entityType: 'x', entityId: 'x', title: 'x', requestedById: 'x' }))).rejects.toThrow(/not configured/);
+    await expect(atomic((tx) => createApproval(tx, { type: 'DISCOUNT_AUTO', entityType: 'x', entityId: 'x', title: 'x', requestedById: 'x' }))).rejects.toThrow(/not configured/);
     await prisma.approvalWorkflow.update({ where: { type: 'REFUND' }, data: { levels: [{ level: 1, role: 'finance_manager', minAmount: 1_000_000 }] } });
     try {
-      await expect(prisma.$transaction((tx) => createApproval(tx, { type: 'REFUND', entityType: 'refund', entityId: 'r1', title: 'x', amount: 10, requestedById: 'x' }))).rejects.toThrow(/not configured/);
+      await expect(atomic((tx) => createApproval(tx, { type: 'REFUND', entityType: 'refund', entityId: 'r1', title: 'x', amount: 10, requestedById: 'x' }))).rejects.toThrow(/not configured/);
     } finally {
       await prisma.approvalWorkflow.update({ where: { type: 'REFUND' }, data: { levels: [{ level: 1, role: 'finance_manager' }, { level: 2, role: 'management', minAmount: 5000 }] } });
     }
@@ -107,7 +108,7 @@ describe('SEC-T12 segregation of duties', () => {
       request(app).post(`/api/v1/approvals/${r.body.approval.id}/act`).set(as(acad)).send({ action: 'APPROVE' }),
       request(app).post(`/api/v1/approvals/${r.body.approval.id}/act`).set(as(sa2)).send({ action: 'APPROVE' }),
     ]);
-    expect([a.status, b.status].sort()).toEqual([200, 403]);
+    expect([a.status, b.status].sort(), JSON.stringify([a.body, b.body])).toEqual([200, 403]);
     expect(await prisma.approvalAction.count({ where: { requestId: r.body.approval.id } })).toBe(1);
     expect(await prisma.studentHistory.count({ where: { studentId: st.id, type: 'BATCH' } })).toBe(1);
   });

@@ -1,26 +1,20 @@
-/** File uploads with type & size limits (FR-DOC-01). Stored with random names outside the web root. */
+/**
+ * File uploads with type & size limits (FR-DOC-01). Files are checked in memory and then stored privately in R2
+ * under a random name; nothing is written to local disk.
+ */
 import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
-import crypto from 'crypto';
+import crypto from 'node:crypto';
+import { Readable } from 'node:stream';
+import type { Response } from 'express';
 import { config } from '../config';
 import { badRequest } from './http';
+import { getFile, isStoredName, putFile } from './files';
 
 const ALLOWED = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
-const root = path.resolve(config.uploadDir);
-fs.mkdirSync(root, { recursive: true });
-
-export const storedPath = (name: string) => {
-  const p = path.join(root, path.basename(name));
-  if (!p.startsWith(root + path.sep)) throw badRequest('Invalid path');
-  return p;
-};
+const EXT: Record<string, string> = { 'application/pdf': '.pdf', 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' };
 
 export const upload = multer({
-  storage: multer.diskStorage({
-    destination: root,
-    filename: (_req, file, cb) => cb(null, crypto.randomBytes(16).toString('hex') + path.extname(file.originalname).toLowerCase().replace(/[^.a-z0-9]/g, '')),
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: config.maxUploadMb * 1024 * 1024, files: 10 },
   fileFilter: (_req, file, cb) => {
     if (ALLOWED.includes(file.mimetype)) cb(null, true);
@@ -28,11 +22,9 @@ export const upload = multer({
   },
 });
 
-/** Content sniffing: the declared type must match the file's real signature (S18, SEC-09). */
 /**
- * Real file signature for each allowed type. A fixed switch (no lookup by the client-declared name), so an
- * unexpected type such as "constructor" or "__proto__" can only ever return false
- * (CodeQL js/unvalidated-dynamic-method-call).
+ * Content sniffing: the declared type must match the file's real signature (S18, SEC-09).
+ * A fixed switch (no lookup by the client-declared name), so an unexpected type can only ever return false.
  */
 function signatureMatches(mime: string, b: Buffer): boolean {
   switch (mime) {
@@ -43,31 +35,38 @@ function signatureMatches(mime: string, b: Buffer): boolean {
     default: return false;
   }
 }
-/** Uploaded files must live directly in the upload directory (multer names them; never trust the path blindly). */
-const uploadedPath = (filePath: string) => {
-  const p = path.resolve(filePath);
-  if (path.dirname(p) !== root) throw badRequest('Invalid upload path');
-  return storedPath(path.basename(p));
-};
-export function fileMatchesType(filePath: string, mime: string): boolean {
-  if (!ALLOWED.includes(mime)) return false;
-  const fd = fs.openSync(uploadedPath(filePath), 'r');
-  try {
-    const buf = Buffer.alloc(16);
-    const n = fs.readSync(fd, buf, 0, 16, 0);
-    return n >= 4 && signatureMatches(mime, buf.subarray(0, n));
-  } finally {
-    fs.closeSync(fd);
-  }
+export function bufferMatchesType(buf: Buffer, mime: string): boolean {
+  return ALLOWED.includes(mime) && buf.length >= 4 && signatureMatches(mime, buf.subarray(0, 16));
 }
 
-/** Express middleware placed after multer: rejects (and deletes) uploads whose content does not match their type. */
+/**
+ * Express middleware placed after multer: rejects uploads whose content does not match their type, then stores
+ * the accepted files in R2. Afterwards `file.filename` (and `file.path`) is the stored name.
+ */
 export function verifyUploads(req: any, _res: any, next: (e?: unknown) => void) {
-  const files: Express.Multer.File[] = [...(req.file ? [req.file] : []), ...(Array.isArray(req.files) ? req.files : Object.values(req.files ?? {}).flat())];
-  const bad = files.filter((f) => !fileMatchesType(f.path, f.mimetype));
-  if (bad.length) {
-    for (const f of files) fs.rmSync(uploadedPath(f.path), { force: true });
-    return next(badRequest('One or more files are not valid PDF, JPG, PNG or WEBP files.'));
-  }
-  next();
+  const list: Express.Multer.File[] = [...(req.file ? [req.file] : []), ...(Array.isArray(req.files) ? req.files : Object.values(req.files ?? {}).flat())] as Express.Multer.File[];
+  if (list.some((f) => !bufferMatchesType(f.buffer, f.mimetype))) return next(badRequest('One or more files are not valid PDF, JPG, PNG or WEBP files.'));
+  Promise.all(
+    list.map(async (f) => {
+      const name = crypto.randomBytes(16).toString('hex') + EXT[f.mimetype];
+      await putFile(name, new Uint8Array(f.buffer), f.mimetype);
+      f.filename = name;
+      f.path = name;
+    }),
+  ).then(() => next(), next);
+}
+
+/** Stored name check for names read from the database (never a path). */
+export const storedName = (name: string) => {
+  if (!isStoredName(name)) throw badRequest('Invalid file reference');
+  return name;
+};
+
+/** Streams a stored file to the response; returns false when it does not exist. */
+export async function sendStoredFile(res: Response, name: string): Promise<boolean> {
+  const obj = await getFile(storedName(name));
+  if (!obj) return false;
+  res.setHeader('Content-Length', String(obj.size));
+  Readable.fromWeb(obj.body as any).pipe(res);
+  return true;
 }

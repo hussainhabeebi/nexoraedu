@@ -3,13 +3,14 @@
  * NO password. They receive a link (default 72 h, configurable 1–168 h) to set their own password, which must
  * meet the policy; privileged roles then enrol MFA. Replaces temporary passwords sent by WhatsApp/email.
  */
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '#prisma';
 import { config } from '../config';
 import { prisma } from './prisma';
 import { getSettings } from './settings';
 import { randomToken, sha256 } from './util';
+import { type Tx } from './db';
 
-type Db = Prisma.TransactionClient | typeof prisma;
+type Db = Tx | typeof prisma;
 
 export async function issueActivationLink(db: Db, userId: string, opts: { hours?: number } = {}) {
   const s = await getSettings();

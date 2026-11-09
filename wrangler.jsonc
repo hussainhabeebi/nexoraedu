@@ -1,19 +1,50 @@
-// Cloudflare Worker: nexoraed.com (website + staff & student portals + /api proxy)
+// Cloudflare Worker for nexoraed.com: the React app (static assets) and the ERP API in ONE Worker.
+// Deployed by Workers Builds from GitHub. Production = branch `main`; staging = the separate Worker
+// `nexoraedu-staging` (env.staging below) with its own database, bucket and secrets.
+// Secrets (JWT_SECRET, APP_ENCRYPTION_KEY, …) are set in the Dashboard: Worker → Settings → Variables and Secrets.
 {
-  "$schema": "frontend/node_modules/wrangler/config-schema.json",
+  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "nexoraedu",
-  "main": "frontend/worker/index.ts",
-  "compatibility_date": "2025-09-01",
+  "main": "backend/src/worker.ts",
+  "compatibility_date": "2025-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // PDFKit's browser build uses import.meta.url only as a key for its bundled colour profile.
+  "define": { "import.meta.url": "\"file:///bundle/worker.js\"" },
   "assets": {
     "directory": "./frontend/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*", "/health"]
   },
+  "d1_databases": [
+    // database_id: copy from Dashboard → Storage & Databases → D1 → nexora-erp-prod (created on approval).
+    { "binding": "DB", "database_name": "nexora-erp-prod", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "backend/migrations" }
+  ],
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "nexora-files-prod" }],
+  "triggers": { "crons": ["* * * * *", "*/5 * * * *", "30 3 * * *"] },
   "vars": {
-    // Public HTTPS URL of the backend (Cloudflare Tunnel hostname)
-    "API_ORIGIN": "https://api.nexoraed.com"
+    "APP_ENV": "production",
+    "PUBLIC_APP_URL": "https://nexoraed.com",
+    "API_BASE_URL": "https://nexoraed.com",
+    "CORS_ORIGINS": "https://nexoraed.com,https://www.nexoraed.com"
   },
-  // PROXY_SECRET is a secret: Worker → Settings → Variables and Secrets (or `npx wrangler secret put PROXY_SECRET`)
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+  "env": {
+    "staging": {
+      "name": "nexoraedu-staging",
+      "define": { "import.meta.url": "\"file:///bundle/worker.js\"" },
+      "d1_databases": [
+        { "binding": "DB", "database_name": "nexora-erp-staging", "database_id": "00000000-0000-0000-0000-000000000001", "migrations_dir": "backend/migrations" }
+      ],
+      "r2_buckets": [{ "binding": "FILES", "bucket_name": "nexora-files-staging" }],
+      "triggers": { "crons": ["* * * * *", "*/5 * * * *", "30 3 * * *"] },
+      "vars": {
+        "APP_ENV": "staging",
+        "PUBLIC_APP_URL": "https://nexoraedu-staging.nexoraacademy.workers.dev",
+        "API_BASE_URL": "https://nexoraedu-staging.nexoraacademy.workers.dev",
+        "CORS_ORIGINS": "https://nexoraedu-staging.nexoraacademy.workers.dev"
+      },
+      "observability": { "enabled": true }
+    }
+  }
 }

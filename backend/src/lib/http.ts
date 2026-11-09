@@ -1,7 +1,7 @@
 import type { NextFunction, Request, Response, RequestHandler } from 'express';
 import { ZodError, type ZodTypeAny, type z } from 'zod';
-import { Prisma } from '@prisma/client';
-import crypto from 'crypto';
+import { Prisma } from '#prisma';
+import crypto from 'node:crypto';
 
 export class HttpError extends Error {
   constructor(public status: number, message: string, public code = 'ERROR', public details?: unknown) {
@@ -42,6 +42,7 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
     if (err.code === 'P2002')
       return res.status(409).json({ error: { code: 'DUPLICATE', message: `A record with this ${(err.meta?.target as string[] | undefined)?.join(', ') ?? 'value'} already exists.`, ref } });
+    if (err.code === 'P2034') return res.status(409).json({ error: { code: 'BUSY', message: 'This record is being changed by someone else. Please try again.', ref } });
     if (err.code === 'P2025') return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Record not found.', ref } });
   }
   if ((err as any)?.type === 'entity.parse.failed') return res.status(400).json({ error: { code: 'BAD_JSON', message: 'The request body is not valid JSON.', ref } });

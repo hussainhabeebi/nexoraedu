@@ -17,11 +17,11 @@
  *  E7 Every change is audit-logged in the same transaction and noted in the immutable student history.
  *  students.courseId / batchId always mirror the current (or most recent) enrollment for existing code paths.
  */
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '#prisma';
 import { badRequest, conflict, notFound } from '../lib/http';
 import { assertBatchAvailable } from './admissions';
+import { type Tx } from '../lib/db';
 
-type Tx = Prisma.TransactionClient;
 
 export const CURRENT_STATUSES = ['ACTIVE', 'ON_HOLD'] as const;
 export const CLOSED_STATUSES = ['COMPLETED', 'TRANSFERRED', 'WITHDRAWN', 'TERMINATED', 'CANCELLED'] as const;
@@ -39,7 +39,7 @@ export async function openEnrollment(
   p: { studentId: string; courseId: string; batchId: string | null; source: EnrollmentSource; applicationId?: string | null; approvalRequestId?: string | null; previousEnrollmentId?: string | null; startDate?: Date; actorId?: string | null; reason?: string; capacityChecked?: boolean },
 ) {
   // Serialise enrollment changes per student (same lock the finance code uses).
-  await tx.$queryRaw`SELECT id FROM students WHERE id = ${p.studentId} FOR UPDATE`;
+  await tx.lock(`student:${p.studentId}`);
   const cur = await currentEnrollment(tx, p.studentId);
   if (cur) throw conflict('The student already has a current enrollment. Transfer, complete or close it first.', { enrollmentId: cur.id });
   if (p.batchId && !p.capacityChecked) await assertBatchAvailable(tx, p.batchId, p.courseId);
@@ -64,7 +64,7 @@ export async function closeEnrollment(tx: Tx, enrollmentId: string, status: (typ
 
 /** E4: approved BATCH_TRANSFER (batch transfer or course change). */
 export async function transferEnrollment(tx: Tx, p: { studentId: string; toBatchId: string; reason: string; approvalRequestId: string; actorId: string }) {
-  await tx.$queryRaw`SELECT id FROM students WHERE id = ${p.studentId} FOR UPDATE`;
+  await tx.lock(`student:${p.studentId}`);
   const to = await tx.batch.findUniqueOrThrow({ where: { id: p.toBatchId } });
   const cur = await currentEnrollment(tx, p.studentId);
   if (!cur) throw badRequest('The student has no current enrollment to transfer. Re-activate the student first.');
@@ -126,7 +126,7 @@ export async function syncEnrollmentWithStudentStatus(tx: Tx, studentId: string,
 
 /** E6: cancel an enrollment recorded in error / abandoned before any study or payment. */
 export async function cancelEnrollment(tx: Tx, p: { studentId: string; enrollmentId: string; reason: string; actorId: string }) {
-  await tx.$queryRaw`SELECT id FROM students WHERE id = ${p.studentId} FOR UPDATE`;
+  await tx.lock(`student:${p.studentId}`);
   const e = await tx.enrollment.findFirst({ where: { id: p.enrollmentId, studentId: p.studentId }, include: { feePlans: { select: { id: true } } } });
   if (!e) throw notFound('Enrollment not found');
   if (!(CURRENT_STATUSES as readonly string[]).includes(e.status)) throw conflict(`Only a current enrollment can be cancelled (this one is ${e.status.toLowerCase()}).`);

@@ -1,13 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import { BaseSequencer, type TestSpecification } from 'vitest/node';
 
-/** Owner connection (migrations, seed). The tests themselves run as the restricted app role (R7). */
-const owner = process.env.TEST_DATABASE_URL || 'postgresql://nexora:nexora@localhost:5432/nexora_test?schema=public';
-const u = new URL(owner);
-u.username = 'nexora_app_test';
-u.password = 'nexora_app_test_pw';
-const appUrl = process.env.TEST_APP_DATABASE_URL || u.toString();
-
 /** Deterministic order: files share one database, so run them alphabetically (00-… first, z-… last). */
 class AlphabeticalSequencer extends BaseSequencer {
   async sort(files: TestSpecification[]) {
@@ -16,8 +9,11 @@ class AlphabeticalSequencer extends BaseSequencer {
 }
 
 export default defineConfig({
+  // Tests run in Node.js against a local D1/R2 (see test/d1-env.ts). `#prisma` (package.json "imports")
+  // resolves to the Node.js Prisma client here and to the Cloudflare client in the Worker build.
   test: {
     globalSetup: './test/global-setup.ts',
+    setupFiles: ['./test/setup-d1.ts'],
     testTimeout: 30000,
     hookTimeout: 120000,
     fileParallelism: false,
@@ -25,8 +21,6 @@ export default defineConfig({
     env: {
       NODE_ENV: 'test',
       APP_ENV: 'test',
-      DATABASE_URL: appUrl,
-      TEST_OWNER_DATABASE_URL: owner,
       AUTH_RATE_LIMIT: '100000',
       AUTH_ACCOUNT_RATE_LIMIT: '100000',
       AUTH_IP_RATE_LIMIT: '100000',

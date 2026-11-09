@@ -10,6 +10,7 @@ import { getChatwootConfig } from '../services/chatwoot';
 import { notifyUser } from '../services/notify';
 import { createLead, findDuplicateLead } from './crm';
 import { recordPayment } from '../services/finance';
+import { atomic } from '../lib/db';
 
 const r = Router();
 
@@ -46,13 +47,14 @@ r.post('/chatwoot', ah(async (req, res) => {
       let lead = await prisma.lead.findFirst({ where: { phoneNormalized: phone }, orderBy: { createdAt: 'desc' } });
       const student = await prisma.student.findUnique({ where: { phoneNormalized: phone } });
       if (!lead && !student && c.autoCreateLeads) {
-        lead = await prisma.$transaction((tx) => createLead(tx, { name: sender.name || phone, phone, email: sender.email || null, source: 'whatsapp', notes: `First WhatsApp message: ${String(e.content ?? '').slice(0, 500)}` }, undefined, { chatwootContactId: Number(sender.id) || null, chatwootConversationId: conversationId || null }));
+        lead = await atomic((tx) => createLead(tx, { name: sender.name || phone, phone, email: sender.email || null, source: 'whatsapp', notes: `First WhatsApp message: ${String(e.content ?? '').slice(0, 500)}` }, undefined, { chatwootContactId: Number(sender.id) || null, chatwootConversationId: conversationId || null }));
       }
       if (lead) {
-        await prisma.$transaction([
-          prisma.leadActivity.create({ data: { leadId: lead.id, type: 'WHATSAPP', direction: 'INBOUND', content: String(e.content ?? '[attachment]'), meta: { conversationId, messageId: e.id } } }),
-          prisma.lead.update({ where: { id: lead.id }, data: { lastActivityAt: new Date(), chatwootConversationId: conversationId || lead.chatwootConversationId, chatwootContactId: Number(sender.id) || lead.chatwootContactId } }),
-        ]);
+        const l = lead;
+        await atomic(async (tx) => {
+          await tx.leadActivity.create({ data: { leadId: l.id, type: 'WHATSAPP', direction: 'INBOUND', content: String(e.content ?? '[attachment]'), meta: { conversationId, messageId: e.id } } });
+          await tx.lead.update({ where: { id: l.id }, data: { lastActivityAt: new Date(), chatwootConversationId: conversationId || l.chatwootConversationId, chatwootContactId: Number(sender.id) || l.chatwootContactId } });
+        });
         if (lead.ownerId) await notifyUser(lead.ownerId, `WhatsApp from ${lead.name}`, String(e.content ?? '').slice(0, 140), `/staff/leads/${lead.id}`);
       }
       if (student) {
@@ -83,7 +85,7 @@ r.post('/website-leads', ah(async (req, res) => {
     await prisma.leadActivity.create({ data: { leadId: dup.id, type: 'SYSTEM', content: `Repeat enquiry via ${d.source}: ${d.message ?? ''}` } });
     return res.json({ ok: true, duplicate: true });
   }
-  await prisma.$transaction((tx) => createLead(tx, { name: d.name, phone: d.phone, email: d.email, courseId: course?.id, source: d.source, notes: d.message }));
+  await atomic((tx) => createLead(tx, { name: d.name, phone: d.phone, email: d.email, courseId: course?.id, source: d.source, notes: d.message }));
   res.status(201).json({ ok: true });
 }));
 
@@ -105,7 +107,7 @@ r.post('/payment', ah(async (req: any, res) => {
   if (!st) throw new HttpError(404, 'Unknown student', 'NOT_FOUND');
   const existing = await prisma.payment.findUnique({ where: { gatewayRef: d.transactionId } });
   if (existing) return res.json({ ok: true, duplicate: true, receipt: existing.receiptNumber });
-  const p = await prisma.$transaction((tx) => recordPayment(tx, { studentId: st.id, amount: d.amount, mode: 'ONLINE', reference: d.transactionId, gatewayRef: d.transactionId, payer: st.fullName }));
+  const p = await atomic((tx) => recordPayment(tx, { studentId: st.id, amount: d.amount, mode: 'ONLINE', reference: d.transactionId, gatewayRef: d.transactionId, payer: st.fullName }));
   res.json({ ok: true, receipt: p.receiptNumber });
 }));
 

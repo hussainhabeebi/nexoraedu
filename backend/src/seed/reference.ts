@@ -5,7 +5,8 @@
  *
  *   npm run db:seed:reference
  */
-import { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '#prisma';
+import { withLocalDb } from '../cli/local-db';
 import { DEFAULT_ROLES } from '../lib/permissions';
 
 export async function seedReference(prisma: PrismaClient) {
@@ -80,12 +81,11 @@ export async function seedReference(prisma: PrismaClient) {
 }
 
 if (require.main === module) {
-  const prisma = new PrismaClient();
-  seedReference(prisma)
+  withLocalDb((prisma) => seedReference(prisma)
     .then(() => console.log('Reference data seeded (no users created). Create the first Super Administrator with `npm run admin:bootstrap`.'))
     .catch((e) => {
       console.error(e);
       process.exitCode = 1;
     })
-    .finally(() => prisma.$disconnect());
+  );
 }

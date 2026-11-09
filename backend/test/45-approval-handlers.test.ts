@@ -5,6 +5,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { app, as, makeStudent, makeUser, prisma, sessionFor } from './helpers';
 import { createFeePlan, recordPayment } from '../src/services/finance';
+import { atomic } from '../src/lib/db';
 
 let sa: string, accounts: string, finmgr: string, director: string, acad: string, exOff: string, fac: string;
 let studentId: string;
@@ -13,10 +14,8 @@ beforeAll(async () => {
   [sa, accounts, finmgr, director, acad, exOff, fac] = await Promise.all([s.username, 'accounts', 'finmgr', 'director', 'acadmgr', 'examofficer', 'faculty1'].map((u) => sessionFor(u)));
   const st = await makeStudent({});
   studentId = st.id;
-  await prisma.$transaction(async (tx) => {
-    await createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 1 });
-    await recordPayment(tx, { studentId: st.id, amount: 8000, mode: 'CASH' });
-  });
+  await atomic((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 1 }));
+  await atomic((tx) => recordPayment(tx, { studentId: st.id, amount: 8000, mode: 'CASH' }));
 });
 const act = (id: string, tok: string, action: string, comment?: string) => request(app).post(`/api/v1/approvals/${id}/act`).set(as(tok)).send({ action, comment });
 
@@ -51,10 +50,8 @@ describe('payment cancellation', () => {
     expect((await request(app).post(`/api/v1/finance/payments/${refunded.id}/cancel-request`).set(as(accounts)).send({ reason: 'Refunded already' })).status).toBe(409);
     // Own synthetic student and receipt for the rejection flow.
     const st = await makeStudent({});
-    const pay = await prisma.$transaction(async (tx) => {
-      await createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 1 });
-      return recordPayment(tx, { studentId: st.id, amount: 8000, mode: 'CASH' });
-    });
+    await atomic((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 1 }));
+    const pay = await atomic((tx) => recordPayment(tx, { studentId: st.id, amount: 8000, mode: 'CASH' }));
     const c1 = await request(app).post(`/api/v1/finance/payments/${pay.id}/cancel-request`).set(as(accounts)).send({ reason: 'Wrong student selected' });
     expect(c1.status).toBe(200);
     expect((await request(app).post(`/api/v1/finance/payments/${pay.id}/cancel-request`).set(as(accounts)).send({ reason: 'Again please' })).status).toBe(400);

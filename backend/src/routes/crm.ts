@@ -1,7 +1,7 @@
 /** CRM (SRS §11): leads, assignment, follow-ups, communication log, counselling, applications, admission conversion. */
 import { Router, type Request } from 'express';
 import { z } from 'zod';
-import type { LeadStatus, Prisma } from '@prisma/client';
+import type { LeadStatus, Prisma } from '#prisma';
 import { prisma } from '../lib/prisma';
 import { ah, badRequest, conflict, forbidden, notFound, paging } from '../lib/http';
 import { can, userCan } from '../lib/auth';
@@ -12,9 +12,10 @@ import { normalizeEmail, normalizePhone, toCsv } from '../lib/util';
 import { createApproval } from '../services/approvals';
 import { applicationDataSchema, assertBatchAvailable, assertNoDuplicateStudent, validateApplicationData } from '../services/admissions';
 import { notifyUser } from '../services/notify';
+import { atomic, type Tx, type ReadDb } from '../lib/db';
+import { background } from '../lib/background';
 
 const r = Router();
-type Tx = Prisma.TransactionClient;
 
 const STATUSES = ['NEW', 'CONTACTED', 'INTERESTED', 'COUNSELLED', 'APPLICATION', 'ADMITTED', 'NOT_INTERESTED', 'LOST', 'JUNK'] as const;
 const CLOSED: LeadStatus[] = ['ADMITTED', 'NOT_INTERESTED', 'LOST', 'JUNK'];
@@ -37,7 +38,7 @@ async function getScopedLead(req: Request, id: string) {
 }
 
 /** CRM-04: automatic assignment — least-loaded active counselor (round-robin on ties by oldest last assignment). */
-export async function pickCounselor(tx: Tx = prisma) {
+export async function pickCounselor(tx: ReadDb = prisma) {
   const counselors = await tx.user.findMany({ where: { isActive: true, roles: { some: { role: { key: 'counselor' } } } }, select: { id: true } });
   if (!counselors.length) return null;
   const loads = await tx.lead.groupBy({ by: ['ownerId'], where: { ownerId: { in: counselors.map((c) => c.id) }, status: { notIn: CLOSED } }, _count: true });
@@ -46,7 +47,7 @@ export async function pickCounselor(tx: Tx = prisma) {
 }
 
 /** CRM-16: duplicate detection by normalized phone/email. */
-export async function findDuplicateLead(tx: Tx, phone: string, email?: string | null) {
+export async function findDuplicateLead(tx: ReadDb, phone: string, email?: string | null) {
   const pn = normalizePhone(phone);
   const en = normalizeEmail(email);
   return tx.lead.findFirst({
@@ -90,7 +91,7 @@ export async function createLead(tx: Tx, d: z.infer<typeof leadInput>, actorId?:
   await tx.leadActivity.create({ data: { leadId: lead.id, type: 'SYSTEM', content: `Lead created from ${d.source}${ownerId ? '' : ' (unassigned)'}`, userId: actorId } });
   if (ownerId) {
     await tx.leadActivity.create({ data: { leadId: lead.id, type: 'ASSIGNMENT', content: 'Assigned automatically', userId: actorId, meta: { to: ownerId } } });
-    setImmediate(() => notifyUser(ownerId, 'New lead assigned', `${lead.name} (${lead.phone})`, `/staff/leads/${lead.id}`).catch(() => undefined));
+    background(() => notifyUser(ownerId, 'New lead assigned', `${lead.name} (${lead.phone})`, `/staff/leads/${lead.id}`).catch(() => undefined));
   }
   return lead;
 }
@@ -109,10 +110,10 @@ r.get('/leads', can('leads:read'), ah(async (req, res) => {
     ...(req.query.from && { createdAt: { gte: new Date(String(req.query.from)) } }),
     ...(q && {
       OR: [
-        { name: { contains: q, mode: 'insensitive' } },
-        { code: { contains: q, mode: 'insensitive' } },
+        { name: { contains: q } },
+        { code: { contains: q } },
         { phoneNormalized: { contains: q.replace(/\D/g, '') || q } },
-        { email: { contains: q, mode: 'insensitive' } },
+        { email: { contains: q } },
       ],
     }),
   };
@@ -144,7 +145,7 @@ r.post('/leads', can('leads:create'), ah(async (req, res) => {
   const d = leadInput.parse(req.body);
   if (d.ownerId && !userCan(req, 'leads:assign')) d.ownerId = req.user!.id;
   if (!d.ownerId && !userCan(req, 'leads:assign')) d.ownerId = req.user!.id; // counselor-created leads stay with them
-  const lead = await prisma.$transaction(async (tx) => {
+  const lead = await atomic(async (tx) => {
     const dup = await findDuplicateLead(tx, d.phone, d.email);
     if (dup) throw conflict(`A lead with this phone or email already exists (${dup.code} — ${dup.name}, owner: ${dup.owner?.name ?? 'unassigned'}).`, { id: dup.id, code: dup.code });
     const lead = await createLead(tx, d, req.user!.id);
@@ -176,7 +177,7 @@ r.get('/leads/:id', can('leads:read'), ah(async (req, res) => {
 r.patch('/leads/:id', can('leads:update'), ah(async (req, res) => {
   const before = await getScopedLead(req, req.params.id);
   const d = leadInput.omit({ ownerId: true }).partial().parse(req.body);
-  const lead = await prisma.$transaction(async (tx) => {
+  const lead = await atomic(async (tx) => {
     const lead = await tx.lead.update({
       where: { id: before.id },
       data: {
@@ -199,7 +200,7 @@ r.post('/leads/:id/status', can('leads:update'), ah(async (req, res) => {
   if (status === 'ADMITTED') throw badRequest('Leads become Admitted only through the admission approval.');
   if (['LOST', 'JUNK', 'NOT_INTERESTED'].includes(status) && !reason?.trim()) throw badRequest('Please select a reason to close this lead.');
   if (lead.status === 'ADMITTED') throw badRequest('This lead has already been admitted.');
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     await tx.lead.update({ where: { id: lead.id }, data: { status, closeReason: reason ?? null, lastActivityAt: new Date(), ...(CLOSED.includes(status) && { nextFollowUpAt: null }) } });
     await tx.leadActivity.create({ data: { leadId: lead.id, type: 'STATUS', content: `${lead.status} → ${status}${reason ? ` (${reason})` : ''}`, userId: req.user!.id } });
     if (CLOSED.includes(status)) await tx.followUp.updateMany({ where: { leadId: lead.id, status: 'PENDING' }, data: { status: 'CANCELLED' } });
@@ -215,7 +216,7 @@ r.post('/leads/assign', can('leads:assign'), ah(async (req, res) => {
   const owner = await prisma.user.findFirst({ where: { id: ownerId, isActive: true, roles: { some: { role: { key: { in: ['counselor', 'sales_manager'] } } } } } });
   if (!owner) throw badRequest('Selected counselor is not an active counselor or sales manager.');
   const leads = await prisma.lead.findMany({ where: { id: { in: leadIds } }, select: { id: true, ownerId: true } });
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     await tx.lead.updateMany({ where: { id: { in: leadIds } }, data: { ownerId } });
     await tx.leadActivity.createMany({ data: leads.map((l) => ({ leadId: l.id, type: 'ASSIGNMENT', content: `Reassigned to ${owner.name}: ${reason}`, userId: req.user!.id, meta: { from: l.ownerId, to: ownerId } })) });
     await tx.followUp.updateMany({ where: { leadId: { in: leadIds }, status: 'PENDING' }, data: { userId: ownerId } });
@@ -229,7 +230,7 @@ r.post('/leads/assign', can('leads:assign'), ah(async (req, res) => {
 r.post('/leads/:id/activities', can('leads:update'), ah(async (req, res) => {
   const lead = await getScopedLead(req, req.params.id);
   const d = z.object({ type: z.enum(['CALL', 'EMAIL', 'SMS', 'WHATSAPP', 'MEETING', 'NOTE']), direction: z.enum(['INBOUND', 'OUTBOUND']).optional(), content: z.string().min(1).max(5000), outcome: z.string().optional(), nextStep: z.string().optional() }).parse(req.body);
-  const a = await prisma.$transaction(async (tx) => {
+  const a = await atomic(async (tx) => {
     const a = await tx.leadActivity.create({ data: { ...d, leadId: lead.id, userId: req.user!.id } });
     await tx.lead.update({ where: { id: lead.id }, data: { lastActivityAt: new Date(), ...(lead.status === 'NEW' && d.type !== 'NOTE' && { status: 'CONTACTED' }) } });
     return a;
@@ -241,7 +242,7 @@ r.post('/leads/:id/activities', can('leads:update'), ah(async (req, res) => {
 r.post('/leads/:id/follow-ups', can('leads:update'), ah(async (req, res) => {
   const lead = await getScopedLead(req, req.params.id);
   const d = z.object({ dueAt: z.coerce.date(), mode: z.enum(['CALL', 'WHATSAPP', 'EMAIL', 'MEETING', 'VISIT']).default('CALL'), note: z.string().optional() }).parse(req.body);
-  const f = await prisma.$transaction(async (tx) => {
+  const f = await atomic(async (tx) => {
     const f = await tx.followUp.create({ data: { ...d, leadId: lead.id, userId: lead.ownerId ?? req.user!.id } });
     const next = await tx.followUp.findFirst({ where: { leadId: lead.id, status: 'PENDING' }, orderBy: { dueAt: 'asc' } });
     await tx.lead.update({ where: { id: lead.id }, data: { nextFollowUpAt: next?.dueAt ?? null } });
@@ -253,7 +254,7 @@ r.post('/follow-ups/:id/complete', can('leads:update'), ah(async (req, res) => {
   const { outcome, note } = z.object({ outcome: z.string().min(1), note: z.string().optional() }).parse(req.body);
   const f = await prisma.followUp.findUniqueOrThrow({ where: { id: req.params.id } });
   await getScopedLead(req, f.leadId);
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     await tx.followUp.update({ where: { id: f.id }, data: { status: 'DONE', completedAt: new Date() } });
     await tx.leadActivity.create({ data: { leadId: f.leadId, type: f.mode === 'WHATSAPP' ? 'WHATSAPP' : f.mode === 'EMAIL' ? 'EMAIL' : f.mode === 'MEETING' || f.mode === 'VISIT' ? 'MEETING' : 'CALL', direction: 'OUTBOUND', content: note || 'Follow-up completed', outcome, userId: req.user!.id } });
     const next = await tx.followUp.findFirst({ where: { leadId: f.leadId, status: 'PENDING' }, orderBy: { dueAt: 'asc' } });
@@ -275,7 +276,7 @@ r.get('/follow-ups', can('leads:read'), ah(async (req, res) => {
 r.post('/leads/:id/counselling', can('leads:update'), ah(async (req, res) => {
   const lead = await getScopedLead(req, req.params.id);
   const d = z.object({ date: z.coerce.date().default(() => new Date()), courseAdvised: z.string().optional(), remarks: z.string().optional(), outcome: z.string().optional() }).parse(req.body);
-  const c = await prisma.$transaction(async (tx) => {
+  const c = await atomic(async (tx) => {
     const c = await tx.counsellingSession.create({ data: { ...d, leadId: lead.id, counselorId: req.user!.id } });
     if (['NEW', 'CONTACTED', 'INTERESTED'].includes(lead.status)) {
       await tx.lead.update({ where: { id: lead.id }, data: { status: 'COUNSELLED', lastActivityAt: new Date() } });
@@ -299,7 +300,7 @@ r.post('/leads/import', can('leads:create'), ah(async (req, res) => {
       continue;
     }
     try {
-      await prisma.$transaction(async (tx) => {
+      await atomic(async (tx) => {
         const dup = await findDuplicateLead(tx, parsed.data.phone, parsed.data.email);
         if (dup) {
           if (duplicates === 'merge') {
@@ -328,7 +329,7 @@ r.post('/leads/:id/merge', can('leads:delete'), ah(async (req, res) => {
   if (duplicateId === req.params.id) throw badRequest('Choose a different lead to merge.');
   const [keep, dup] = await Promise.all([prisma.lead.findUniqueOrThrow({ where: { id: req.params.id } }), prisma.lead.findUniqueOrThrow({ where: { id: duplicateId } })]);
   if (dup.studentId) throw badRequest('An admitted lead cannot be merged away.');
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     // Communication history is append-only (CRM-10, LOG-01): copy the duplicate's timeline onto the kept lead
     // instead of moving rows (the old code disabled the immutability trigger to do that).
     const history = await tx.leadActivity.findMany({ where: { leadId: dup.id }, orderBy: { createdAt: 'asc' } });
@@ -375,7 +376,7 @@ r.post('/leads/:id/application', can('leads:update'), ah(async (req, res) => {
   validateApplicationData(data);
   if (data.preferences.batchId) await assertBatchAvailable(prisma, data.preferences.batchId, data.preferences.courseId);
   const s = await getSettings();
-  const app = await prisma.$transaction(async (tx) => {
+  const app = await atomic(async (tx) => {
     const code = await nextNumber('application:{year}', s.ids.application, tx);
     const app = await tx.application.create({ data: { code, leadId: lead.id, courseId: data.preferences.courseId, batchId: data.preferences.batchId || null, data: data as any, status: 'UNDER_REVIEW' } });
     await tx.lead.update({ where: { id: lead.id }, data: { status: 'APPLICATION', courseId: data.preferences.courseId, lastActivityAt: new Date() } });
@@ -391,7 +392,7 @@ r.patch('/applications/:id', can('leads:update', 'students:manage'), ah(async (r
   if (['ADMITTED', 'PENDING_APPROVAL'].includes(a.status)) throw badRequest('This application can no longer be edited.');
   const d = z.object({ data: applicationDataSchema.optional(), status: z.enum(['UNDER_REVIEW', 'REJECTED']).optional(), remarks: z.string().optional() }).parse(req.body);
   if (d.data) validateApplicationData(d.data);
-  const u = await prisma.$transaction(async (tx) => {
+  const u = await atomic(async (tx) => {
     const u = await tx.application.update({ where: { id: a.id }, data: { ...(d.data && { data: d.data as any, courseId: d.data.preferences.courseId, batchId: d.data.preferences.batchId || null }), status: d.status, remarks: d.remarks } });
     await audit(tx, req, 'UPDATE', 'application', a.id, a, d);
     return u;
@@ -409,7 +410,7 @@ r.post('/applications/:id/admit', can('leads:update', 'students:manage'), ah(asy
   const bId = batchId ?? a.batchId;
   if (!bId) throw badRequest('Please allocate a batch before requesting admission.');
   await assertBatchAvailable(prisma, bId, a.courseId);
-  const approval = await prisma.$transaction(async (tx) => {
+  const approval = await atomic(async (tx) => {
     await tx.application.update({ where: { id: a.id }, data: { status: 'PENDING_APPROVAL', batchId: bId } });
     const approval = await createApproval(tx, { type: 'ADMISSION', entityType: 'application', entityId: a.id, title: `Admission: ${data.personal.fullName} (${a.code})`, payload: { batchId: bId, installments }, requestedById: req.user!.id });
     await audit(tx, req, 'REQUEST_ADMISSION', 'application', a.id, { status: a.status }, { status: 'PENDING_APPROVAL', batchId: bId, installments, approvalId: approval.id });

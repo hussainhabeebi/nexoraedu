@@ -1,0 +1,6 @@
+# Local development only (`npm run dev`). Copy to .dev.vars. Never put real secrets here.
+APP_ENV=development
+PUBLIC_APP_URL=http://localhost:8787
+API_BASE_URL=http://localhost:8787
+CORS_ORIGINS=http://localhost:8787,http://localhost:5173
+JOBS_ENABLED=true

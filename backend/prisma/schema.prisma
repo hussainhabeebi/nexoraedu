@@ -1,13 +1,23 @@
 // Nexora Academy — Centralized Management Portal
-// Single relational database (SRS §20). PostgreSQL.
+// Single relational database (SRS §20). Cloudflare D1 (SQLite).
+// Money columns are Decimal (stored as REAL in SQLite); the D1 migrations add CHECKs that every stored amount
+// has at most 2 decimals, and the application always rounds before writing (see lib/money).
 
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+  runtime  = "cloudflare"
+}
+
+// Same client for Node.js (tests and CLI scripts only). Vitest maps the import path to this copy.
+generator nodeClient {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma-node"
+  runtime  = "nodejs"
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider = "sqlite"
 }
 
 // ───────────────────────────── Administration ─────────────────────────────
@@ -56,7 +66,7 @@ model Role {
   key         String     @unique
   name        String
   description String?
-  permissions String[]
+  permissions Json
   isSystem    Boolean    @default(false)
   users       UserRole[]
   createdAt   DateTime   @default(now())
@@ -75,7 +85,7 @@ model User {
   mustChangePassword Boolean         @default(false)
   designation        String?
   joiningDate        DateTime?
-  extraPermissions   String[]        @default([])
+  extraPermissions   Json        @default("[]")
   departmentId       String?
   department         Department?     @relation("DeptUsers", fields: [departmentId], references: [id])
   branchId           String?
@@ -222,7 +232,7 @@ model Course {
   eligibility         String?
   mode                String         @default("Classroom")
   imageUrl            String?
-  highlights          String[]       @default([])
+  highlights          Json       @default("[]")
   defaultInstallments Int            @default(1)
   isPublic            Boolean        @default(true)
   isActive            Boolean        @default(true)
@@ -301,7 +311,7 @@ model FacultyProfile {
   userId         String   @unique
   user           User     @relation(fields: [userId], references: [id])
   qualifications String?
-  subjects       String[] @default([])
+  subjects       Json @default("[]")
   availability   Json?
 
   @@map("faculty_profiles")
@@ -694,8 +704,8 @@ model FeeComponent {
   courseId      String
   course        Course   @relation(fields: [courseId], references: [id])
   name          String
-  amount        Decimal  @db.Decimal(12, 2)
-  taxPercent    Decimal  @default(0) @db.Decimal(5, 2)
+  amount        Decimal
+  taxPercent    Decimal  @default(0)
   effectiveFrom DateTime @default(now())
   isActive      Boolean  @default(true)
 
@@ -707,8 +717,8 @@ model FeePlan {
   studentId    String
   student      Student         @relation(fields: [studentId], references: [id])
   courseId     String
-  grossAmount  Decimal         @db.Decimal(12, 2)
-  discount     Decimal         @default(0) @db.Decimal(12, 2)
+  grossAmount  Decimal
+  discount     Decimal         @default(0)
   components   Json
   /// Due-date policy used when the plan was generated: anchor day-of-month (clamped to month end) and the
   /// academy time zone. NULL = plan created before the policy existed (its due dates are kept unchanged).
@@ -718,7 +728,7 @@ model FeePlan {
   enrollmentId String?
   enrollment   Enrollment?     @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
   /// Σ applied fee-adjustment waivers (SRS 22.6), kept like `discount` for display and reconciliation
-  waived       Decimal         @default(0) @db.Decimal(12, 2)
+  waived       Decimal         @default(0)
   installments Installment[]
   adjustments  FeeAdjustment[] @relation("AdjustedPlan")
   /// Set when this plan was created by an approved REBILL adjustment (B2: course billed again)
@@ -733,8 +743,8 @@ model Installment {
   feePlanId      String
   feePlan        FeePlan             @relation(fields: [feePlanId], references: [id])
   seq            Int
-  amount         Decimal             @db.Decimal(12, 2)
-  paidAmount     Decimal             @default(0) @db.Decimal(12, 2)
+  amount         Decimal
+  paidAmount     Decimal             @default(0)
   dueDate        DateTime
   status         String              @default("DUE") // DUE, PARTIAL, PAID, SUPERSEDED (replaced by a custom plan)
   lastReminderAt DateTime?
@@ -755,7 +765,7 @@ model Invoice {
   studentId     String
   feePlanId     String
   installmentId String?
-  amount        Decimal   @db.Decimal(12, 2)
+  amount        Decimal
   issuedAt      DateTime  @default(now())
   dueDate       DateTime?
   status        String    @default("ISSUED")
@@ -768,7 +778,7 @@ model Payment {
   receiptNumber  String              @unique
   studentId      String
   student        Student             @relation(fields: [studentId], references: [id])
-  amount         Decimal             @db.Decimal(12, 2)
+  amount         Decimal
   mode           String
   reference      String?
   payer          String?
@@ -790,7 +800,7 @@ model PaymentAllocation {
   payment       Payment     @relation(fields: [paymentId], references: [id])
   installmentId String
   installment   Installment @relation(fields: [installmentId], references: [id])
-  amount        Decimal     @db.Decimal(12, 2)
+  amount        Decimal
 
   @@map("payment_allocations")
 }
@@ -800,8 +810,8 @@ model LedgerEntry {
   id        String   @id @default(cuid())
   studentId String
   type      String // FEE, PAYMENT, DISCOUNT, SCHOLARSHIP, REFUND, REVERSAL
-  debit     Decimal  @default(0) @db.Decimal(12, 2)
-  credit    Decimal  @default(0) @db.Decimal(12, 2)
+  debit     Decimal  @default(0)
+  credit    Decimal  @default(0)
   refType   String?
   refId     String?
   narration String
@@ -815,7 +825,7 @@ model LedgerEntry {
 model Refund {
   id            String    @id @default(cuid())
   studentId     String
-  amount        Decimal   @db.Decimal(12, 2)
+  amount        Decimal
   reason        String
   status        String    @default("PENDING_APPROVAL") // PENDING_APPROVAL, APPROVED, PAID, REJECTED
   reference     String?
@@ -836,7 +846,7 @@ model FeeAdjustment {
   feePlanId         String
   feePlan           FeePlan       @relation("AdjustedPlan", fields: [feePlanId], references: [id], onDelete: Restrict)
   kind              String // WAIVER, RESCHEDULE, REBILL (new plan for a course the student was already billed for)
-  amount            Decimal       @db.Decimal(12, 2)
+  amount            Decimal
   reason            String
   /// RESCHEDULE: [{ dueDate: "YYYY-MM-DD", amount }]
   schedule          Json?
@@ -864,8 +874,8 @@ model Discount {
   studentId     String
   feePlanId     String
   kind          String // FIXED, PERCENT, SCHOLARSHIP
-  value         Decimal  @db.Decimal(12, 2)
-  amount        Decimal  @db.Decimal(12, 2)
+  value         Decimal
+  amount        Decimal
   reason        String
   status        String   @default("PENDING_APPROVAL")
   requestedById String
@@ -1021,7 +1031,7 @@ model ApprovalRequest {
   entityId      String
   title         String
   payload       Json
-  amount        Decimal?         @db.Decimal(12, 2)
+  amount        Decimal?
   status        String           @default("PENDING") // PENDING, APPROVED, REJECTED, RETURNED
   currentLevel  Int              @default(1)
   levels        Json
@@ -1061,7 +1071,7 @@ model NotificationTemplate {
   waTemplateName String?
   waLanguage     String   @default("en")
   waCategory     String   @default("UTILITY")
-  channels       String[] @default(["IN_APP", "EMAIL", "WHATSAPP"])
+  channels       Json @default("[\"IN_APP\",\"EMAIL\",\"WHATSAPP\"]")
   version        Int      @default(1)
   isActive       Boolean  @default(true)
   updatedAt      DateTime @updatedAt

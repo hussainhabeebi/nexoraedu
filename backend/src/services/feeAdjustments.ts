@@ -24,7 +24,7 @@
  *     Re-checked at approval: the enrollment is still current, no plan was created for it meanwhile, and the course
  *     fee is unchanged (otherwise refused, nothing changes).
  */
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '#prisma';
 import { badRequest, conflict, notFound } from '../lib/http';
 import { nextNumber } from '../lib/sequence';
 import { getSettings } from '../lib/settings';
@@ -32,8 +32,8 @@ import { money } from '../lib/util';
 import { endOfDayUtc, isoDate, parseIsoDate, toCalendarDate } from '../lib/caldate';
 import { createApproval } from './approvals';
 import { courseFee, createFeePlan, ledger, lockStudentAccount, openInstallment } from './finance';
+import { type Tx } from '../lib/db';
 
-type Tx = Prisma.TransactionClient;
 export type ScheduleRow = { dueDate: string; amount: number };
 
 const P = (v: unknown) => Math.round(Number(v ?? 0) * 100);

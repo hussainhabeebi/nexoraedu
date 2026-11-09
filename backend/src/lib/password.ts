@@ -3,9 +3,10 @@
  * not a common/breached password, not one of the last 5 passwords. bcrypt cost 12.
  */
 import bcrypt from 'bcryptjs';
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '#prisma';
 import { prisma } from './prisma';
 import { badRequest } from './http';
+import { type Tx } from './db';
 
 export const BCRYPT_COST = 12;
 export const MIN_LENGTH_FLOOR = 10;
@@ -53,7 +54,7 @@ export function assertPasswordPolicy(pw: string, opts: Parameters<typeof passwor
 
 export const hashPassword = (pw: string) => bcrypt.hash(pw, BCRYPT_COST);
 
-type Db = Prisma.TransactionClient | typeof prisma;
+type Db = Tx | typeof prisma;
 
 /** Rejects reuse of the current password or any of the last HISTORY_DEPTH - 1 previous ones. */
 export async function assertNotReused(db: Db, userId: string, pw: string) {
