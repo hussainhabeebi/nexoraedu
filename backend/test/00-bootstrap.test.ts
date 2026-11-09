@@ -3,7 +3,7 @@
  * Runs first: the seeded test database contains NO Super Administrator; this file creates them via the real
  * bootstrap command (SEC-T01…T05; SRS SEC-01, SEC-04, ADM-01, DEP-02, DEP-11, DEP-18).
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcryptjs';
 import { app, prisma } from './helpers';
@@ -118,6 +118,27 @@ describe('Cloudflare bootstrap endpoint (POST /auth/bootstrap)', () => {
     } finally {
       if (saved === undefined) delete process.env.BOOTSTRAP_TOKEN;
       else process.env.BOOTSTRAP_TOKEN = saved;
+    }
+  });
+});
+
+describe('F1: missing secrets in staging/production fail closed without crashing start-up', () => {
+  it('config loads with empty secrets and the start-up check reports them (Worker answers 503)', async () => {
+    const saved = { ...process.env };
+    try {
+      process.env.APP_ENV = 'production';
+      delete process.env.JWT_SECRET;
+      delete process.env.APP_ENCRYPTION_KEY;
+      vi.resetModules();
+      const fresh = await import('../src/config');
+      expect(fresh.config.jwtSecret).toBe(''); // no insecure fallback
+      expect(fresh.config.encryptionKey).toBe('');
+      const problems = fresh.productionConfigProblems(process.env, 'production').join(' ');
+      expect(problems).toMatch(/JWT_SECRET/);
+      expect(problems).toMatch(/APP_ENCRYPTION_KEY/);
+    } finally {
+      process.env = saved;
+      vi.resetModules();
     }
   });
 });

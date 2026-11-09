@@ -24,13 +24,16 @@ export const config = {
   publicAppUrl: env('PUBLIC_APP_URL', 'http://localhost:5173'),
   apiBaseUrl: env('API_BASE_URL', 'http://localhost:4000'),
   corsOrigins: env('CORS_ORIGINS', 'http://localhost:5173').split(',').map((s) => s.trim()),
-  jwtSecret: env('JWT_SECRET', isHardened || isProd ? undefined : 'dev-insecure-jwt-secret-change-me'),
+  // Staging/production: no fallback. A missing secret is '' here and is reported by productionConfigProblems(),
+  // so the Worker answers 503 (and runs no jobs) instead of crashing at start-up, which would also block the very
+  // first deploy of a new Worker before its secrets can be added (deployment audit F1).
+  jwtSecret: env('JWT_SECRET', isHardened || isProd ? '' : 'dev-insecure-jwt-secret-change-me'),
   /** Access token lifetime (seconds). Sessions are also checked server-side on every request. */
   accessTtlSec: Number(env('ACCESS_TOKEN_TTL_SEC', '600')),
   /** Absolute session lifetime (hours) regardless of activity. */
   sessionMaxHours: Number(env('SESSION_MAX_HOURS', '12')),
   /** 32-byte key (hex or base64) used to encrypt integration credentials and MFA secrets at rest (INT-01). */
-  encryptionKey: env('APP_ENCRYPTION_KEY', isHardened || isProd ? undefined : '0'.repeat(64)),
+  encryptionKey: env('APP_ENCRYPTION_KEY', isHardened || isProd ? '' : '0'.repeat(64)),
   uploadDir: env('UPLOAD_DIR', './uploads'),
   maxUploadMb: Number(env('MAX_UPLOAD_MB', '5')),
   /**

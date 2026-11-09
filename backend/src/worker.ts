@@ -27,19 +27,26 @@ const api = httpServerHandler({ port: PORT }) as { fetch: (req: Request, env: un
 /** Checked once per Worker instance: a misconfigured environment answers 503 instead of serving. */
 let preflight: Promise<string[]> | undefined;
 
+/** Configuration problems (empty = OK). Re-checked after a failure, e.g. once a missing secret is added. */
+async function configProblems(): Promise<string[]> {
+  preflight ??= preflightProblems().catch((e) => [`Startup check failed: ${e?.message ?? e}`]);
+  const problems = await preflight;
+  if (problems.length) {
+    preflight = undefined;
+    console.error(`Refusing to serve:\n - ${problems.join('\n - ')}`);
+  }
+  return problems;
+}
+
 export default {
   async fetch(request: Request, workerEnv: Env, ctx: ExecutionContext): Promise<Response> {
-    preflight ??= preflightProblems().catch((e) => [`Startup check failed: ${e?.message ?? e}`]);
-    const problems = await preflight;
-    if (problems.length) {
-      preflight = undefined; // re-check on the next request (e.g. after a secret is fixed)
-      console.error(`Refusing to serve:\n - ${problems.join('\n - ')}`);
+    if ((await configProblems()).length)
       return Response.json({ error: { code: 'NOT_CONFIGURED', message: 'The service is not configured correctly. The administrator has been notified in the logs.' } }, { status: 503 });
-    }
     return api.fetch(request, workerEnv, ctx);
   },
 
   async scheduled(controller: ScheduledController, _env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(runScheduled(controller.cron, new Date(controller.scheduledTime)));
+    // Same guard as requests: no jobs run on a misconfigured environment.
+    ctx.waitUntil(configProblems().then((p) => (p.length ? undefined : runScheduled(controller.cron, new Date(controller.scheduledTime)))));
   },
 };
