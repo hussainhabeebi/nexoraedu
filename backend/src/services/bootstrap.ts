@@ -43,3 +43,56 @@ export async function bootstrapSuperAdmin(prisma: PrismaClient, a: { email: stri
     return { userId: user.id, token, link: `${publicAppUrl.replace(/\/$/, '')}/reset-password?token=${token}&activate=1` };
   });
 }
+
+/** Why a re-issue was refused (shown to the caller; never contains credentials). */
+export class ReissueRefused extends Error {
+  constructor(message: string, public status: 404 | 409) {
+    super(message);
+  }
+}
+
+/**
+ * Staging only: a fresh single-use activation link for the bootstrapped Super Administrator when the first link
+ * was lost or expired. Never creates a user and never changes the password, roles, MFA or sessions.
+ * Allowed only while the account has never been activated: no password set, never signed in, no MFA, and no
+ * activation link ever used. Every unused activation link is invalidated (expired at once); only the new token's SHA-256 hash
+ * is stored; the link expires in ACTIVATION_MINUTES; an audit row records the re-issue (never the token).
+ */
+export async function reissueActivation(
+  prisma: PrismaClient,
+  a: { username: string; email: string },
+  publicAppUrl: string,
+  meta: { ip?: string; userAgent?: string; requestId?: string } = {},
+) {
+  const d = z.object({ username: z.string().trim().min(3).max(100), email: z.string().trim().email().max(200) }).parse(a);
+  return atomic(async (tx) => {
+    await tx.lock('bootstrap:super_admin'); // same lock as bootstrap: never overlaps with it or another re-issue
+    const u = await tx.user.findFirst({
+      where: { username: d.username.toLowerCase(), email: d.email.toLowerCase(), isActive: true, roles: { some: { role: { key: 'super_admin' } } } },
+      include: { mfaFactor: { select: { confirmedAt: true } } },
+    });
+    if (!u) throw new ReissueRefused('No active Super Administrator matches this username and email.', 404);
+    const usedLinks = await tx.passwordReset.count({ where: { userId: u.id, purpose: 'ENROLL', usedAt: { not: null } } });
+    const reasons = [
+      u.passwordHash !== UNUSABLE_PASSWORD || u.passwordChangedAt ? 'a password has already been set' : null,
+      u.lastLoginAt ? 'the account has already signed in' : null,
+      u.mfaFactor?.confirmedAt ? 'MFA is already enrolled' : null,
+      usedLinks ? 'an activation link has already been used' : null,
+    ].filter(Boolean);
+    if (reasons.length) throw new ReissueRefused(`This account has already been activated (${reasons.join('; ')}). Re-issue refused.`, 409);
+    const now = new Date();
+    // Invalidate by expiring (not by marking used): "used" keeps meaning a real activation, so a lost re-issued
+    // link can itself be replaced while the account is still unactivated.
+    const revoked = await tx.passwordReset.updateMany({ where: { userId: u.id, purpose: 'ENROLL', usedAt: null, expiresAt: { gt: now } }, data: { expiresAt: new Date(now.getTime() - 1000) } });
+    const token = crypto.randomBytes(32).toString('base64url');
+    await tx.passwordReset.create({ data: { userId: u.id, purpose: 'ENROLL', tokenHash: sha256(token), expiresAt: new Date(now.getTime() + ACTIVATION_MINUTES * 60_000) } });
+    await tx.auditLog.create({
+      data: {
+        action: 'BOOTSTRAP_ACTIVATION_REISSUED', entity: 'user', entityId: u.id,
+        newValues: { username: u.username, email: u.email, previousLinksInvalidated: revoked.count, expiresInMinutes: ACTIVATION_MINUTES },
+        ip: meta.ip, userAgent: meta.userAgent?.slice(0, 300), requestId: meta.requestId,
+      },
+    });
+    return { userId: u.id, token, link: `${publicAppUrl.replace(/\/$/, '')}/reset-password?token=${token}&activate=1`, previousLinksInvalidated: revoked.count };
+  });
+}

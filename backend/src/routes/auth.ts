@@ -16,7 +16,7 @@ import { Router, type NextFunction, type Request, type Response } from 'express'
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { D1Store } from '../lib/rate-store';
-import { ACTIVATION_MINUTES, bootstrapSuperAdmin } from '../services/bootstrap';
+import { ACTIVATION_MINUTES, bootstrapSuperAdmin, reissueActivation, ReissueRefused } from '../services/bootstrap';
 
 /** Limiters are created in a fixed order at start-up, so every Worker instance uses the same D1 key prefixes. */
 let storeSeq = 0;
@@ -373,11 +373,16 @@ r.post('/reset-password', limiter, ah(async (req, res) => {
  * X-Bootstrap-Token header. Same rules as the CLI: refused while an active Super Admin exists (except one
  * `second` with a management nomination). Returns the single-use activation link. Delete the secret afterwards.
  */
-r.post('/bootstrap', limiter, ah(async (req, res) => {
+/** BOOTSTRAP_TOKEN check shared by the bootstrap routes: 404 (route hidden) unless the header matches. */
+function assertBootstrapToken(req: Request) {
   const expected = process.env.BOOTSTRAP_TOKEN ?? '';
   const given = req.get('x-bootstrap-token') ?? '';
   const ok = expected.length >= 32 && given.length === expected.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected));
   if (!ok) throw new HttpError(404, 'Not found', 'NOT_FOUND');
+}
+
+r.post('/bootstrap', limiter, ah(async (req, res) => {
+  assertBootstrapToken(req);
   const d = z.object({ email: z.string().email(), name: z.string().min(2), username: z.string().min(3), phone: z.string().optional(), second: z.boolean().optional(), nomination: z.string().optional() }).parse(req.body);
   try {
     const out = await bootstrapSuperAdmin(prisma as any, d, config.publicAppUrl);
@@ -385,6 +390,23 @@ r.post('/bootstrap', limiter, ah(async (req, res) => {
   } catch (e: any) {
     if (e instanceof HttpError || e?.name === 'ZodError') throw e;
     throw new HttpError(409, String(e?.message ?? e), 'BOOTSTRAP_REFUSED');
+  }
+}));
+
+/**
+ * STAGING ONLY: re-issue the activation link of the bootstrapped Super Administrator (lost or expired first link).
+ * Needs X-Bootstrap-Token and the account's username + email; refused (409) once the account has been activated.
+ * Not available in production (404 even with a token). See services/bootstrap.ts reissueActivation().
+ */
+r.post('/bootstrap/reissue-activation', limiter, ah(async (req, res) => {
+  if (!['staging', 'development', 'test'].includes(config.appEnv)) throw new HttpError(404, 'Not found', 'NOT_FOUND');
+  assertBootstrapToken(req);
+  try {
+    const out = await reissueActivation(prisma as any, req.body ?? {}, config.publicAppUrl, { ip: req.ip, userAgent: req.get('user-agent'), requestId: req.id });
+    res.status(201).json({ userId: out.userId, activationLink: out.link, expiresInMinutes: ACTIVATION_MINUTES, previousLinksInvalidated: out.previousLinksInvalidated });
+  } catch (e: any) {
+    if (e instanceof ReissueRefused) throw new HttpError(e.status, e.message, e.status === 404 ? 'NOT_FOUND' : 'REISSUE_REFUSED');
+    throw e;
   }
 }));
 

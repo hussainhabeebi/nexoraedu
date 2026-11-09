@@ -80,7 +80,9 @@ npm run dev:web                                        # optional: Vite hot relo
 ### Accounts
 No account or password is ever seeded. The first Super Administrator gets a single-use 60-minute activation link
 (locally: `admin:bootstrap:dev`; on Cloudflare: `POST /api/v1/auth/bootstrap` while the `BOOTSTRAP_TOKEN` secret is set,
-see below). The owner sets a policy-compliant password and must then enrol an authenticator app. A second named
+see below). Staging only: if that first link is lost or expires before the account is activated,
+`POST /api/v1/auth/bootstrap/reissue-activation` (same token, plus the account's `username` and `email`) issues a fresh
+one and invalidates the old one; it never creates a user and is refused once the account has been activated. The owner sets a policy-compliant password and must then enrol an authenticator app. A second named
 Super Administrator (`--second` with a management nomination) is needed because privileged role grants require
 approval by another Super Administrator. Privileged roles (Super Admin, Administrator, Management, Finance) must use MFA.
 
