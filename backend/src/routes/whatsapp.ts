@@ -8,6 +8,7 @@ import { canAccessBatch, canAccessStudent, studentScope } from '../lib/policy';
 import { audit } from '../lib/audit';
 import { render } from '../lib/util';
 import * as cw from '../services/chatwoot';
+import { atomic } from '../lib/db';
 
 const r = Router();
 
@@ -94,10 +95,10 @@ r.post('/conversations/:id/reply', can('whatsapp:send'), ah(async (req, res) => 
 }));
 
 async function logLeadWa(leadId: string, userId: string, content: string, conversationId: number) {
-  await prisma.$transaction([
-    prisma.leadActivity.create({ data: { leadId, type: 'WHATSAPP', direction: 'OUTBOUND', content, userId, meta: { conversationId } } }),
-    prisma.lead.update({ where: { id: leadId }, data: { chatwootConversationId: conversationId, lastActivityAt: new Date() } }),
-  ]);
+  await atomic(async (tx) => {
+    await tx.leadActivity.create({ data: { leadId, type: 'WHATSAPP', direction: 'OUTBOUND', content, userId, meta: { conversationId } } });
+    await tx.lead.update({ where: { id: leadId }, data: { chatwootConversationId: conversationId, lastActivityAt: new Date() } });
+  });
 }
 
 // Send to a lead (owner or leads:read_all)

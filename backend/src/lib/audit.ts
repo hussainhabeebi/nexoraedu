@@ -4,10 +4,11 @@
  * propagate, so a change can never commit without its audit row (and vice versa). Never swallow failures here.
  */
 import type { Request } from 'express';
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '#prisma';
 import { prisma } from './prisma';
+import { type Tx } from './db';
 
-type Db = Prisma.TransactionClient | typeof prisma;
+type Db = Tx | typeof prisma;
 
 const SENSITIVE = /password|token|secret|hash|otp|recovery|authorization|cookie|^code$/i;
 export function scrub(v: unknown): any {

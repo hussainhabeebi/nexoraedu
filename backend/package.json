@@ -3,32 +3,24 @@
   "version": "1.0.0",
   "private": true,
   "description": "Nexora Academy Centralized Management Portal - API",
-  "main": "dist/index.js",
+  "main": "src/worker.ts",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "prisma generate && tsc -p tsconfig.json",
-    "start": "node dist/index.js",
-    "db:migrate": "prisma migrate deploy",
-    "db:seed:reference": "tsx src/seed/reference.ts",
+    "generate": "prisma generate && node scripts/gen-model-meta.mjs",
+    "postinstall": "npm run generate",
+    "db:migrations:generate": "node scripts/gen-d1-migrations.mjs && tsx scripts/gen-reference-sql.ts",
     "db:seed:demo": "tsx src/seed/demo.ts",
-    "release": "prisma migrate deploy && node dist/seed/reference.js",
-    "admin:bootstrap": "node dist/cli/bootstrap-admin.js",
     "admin:bootstrap:dev": "tsx src/cli/bootstrap-admin.ts",
-    "accounts:legacy": "node dist/cli/legacy-accounts.js",
+    "accounts:legacy:dev": "tsx src/cli/legacy-accounts.ts",
+    "finance:reconcile:dev": "tsx src/cli/reconcile.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "finance:reconcile": "node dist/cli/reconcile.js",
-    "finance:reconcile:dev": "tsx src/cli/reconcile.ts"
-  },
-  "prisma": {
-    "seed": "tsx src/seed/reference.ts"
+    "test": "vitest run"
   },
   "dependencies": {
-    "@prisma/client": "^5.22.0",
+    "@prisma/adapter-d1": "^7.10.1",
+    "@prisma/client": "^7.10.1",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
-    "dotenv": "^18.0.9",
-    "express": "^4.22.3",
+    "express": "^5.3.0",
     "express-rate-limit": "^8.7.3",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
@@ -36,10 +28,10 @@
     "multer": "^2.5.0",
     "nodemailer": "^10.3.1",
     "pdfkit": "^0.20.2",
-    "swagger-ui-express": "^5.0.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261107.1",
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.19",
     "@types/express": "^4.17.25",
@@ -50,12 +42,18 @@
     "@types/nodemailer": "^8.0.2",
     "@types/pdfkit": "^0.17.7",
     "@types/supertest": "^7.2.1",
-    "@types/swagger-ui-express": "^4.1.8",
     "@vitest/coverage-v8": "^5.1.0",
-    "prisma": "^5.22.0",
+    "prisma": "^7.10.1",
     "supertest": "^7.3.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.1.0"
+    "vitest": "^5.1.0",
+    "wrangler": "^4.157.0"
+  },
+  "imports": {
+    "#prisma": {
+      "workerd": "./src/generated/prisma/client.ts",
+      "default": "./src/generated/prisma-node/client.ts"
+    }
   }
 }

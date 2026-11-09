@@ -15,6 +15,12 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import { D1Store } from '../lib/rate-store';
+import { resetPasswordLink } from '../lib/links';
+import { ACTIVATION_MINUTES, bootstrapSuperAdmin, reissueActivation, ReissueRefused } from '../services/bootstrap';
+
+/** Limiters are created in a fixed order at start-up, so every Worker instance uses the same D1 key prefixes. */
+let storeSeq = 0;
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
@@ -30,6 +36,7 @@ import { audit, securityEvent } from '../lib/audit';
 import { assertNotReused, assertPasswordPolicy, BCRYPT_COST, hashPassword, setPassword } from '../lib/password';
 import { newTotpSecret, otpauthUrl, verifyTotp } from '../lib/totp';
 import { notify } from '../services/notify';
+import { atomic } from '../lib/db';
 
 const r = Router();
 const RATE_WINDOW_MS = 15 * 60 * 1000;
@@ -37,7 +44,7 @@ const RATE_LIMITED = { error: { code: 'RATE_LIMIT', message: 'Too many attempts.
 
 /** Per-IP limit (password reset: AUTH_RATE_LIMIT, default 30 per 15 min, unchanged). */
 export function makeAuthLimiter(limit: number) {
-  return rateLimit({ windowMs: RATE_WINDOW_MS, limit, standardHeaders: true, legacyHeaders: false, message: RATE_LIMITED });
+  return rateLimit({ windowMs: RATE_WINDOW_MS, limit, standardHeaders: true, legacyHeaders: false, store: new D1Store(`auth:${++storeSeq}:`), message: RATE_LIMITED });
 }
 const limiter = makeAuthLimiter(Number(process.env.AUTH_RATE_LIMIT || 30));
 
@@ -51,9 +58,9 @@ const limiter = makeAuthLimiter(Number(process.env.AUTH_RATE_LIMIT || 30));
  * MFA codes are additionally limited per challenge (MFA_MAX_ATTEMPTS).
  */
 export function makeSignInLimiters(o: { perAccount: number; perIp: number }) {
-  const perIp = rateLimit({ windowMs: RATE_WINDOW_MS, limit: o.perIp, standardHeaders: true, legacyHeaders: false, message: RATE_LIMITED, keyGenerator: (req) => `signin-ip:${ipKeyGenerator(req.ip ?? '')}` });
+  const perIp = rateLimit({ windowMs: RATE_WINDOW_MS, limit: o.perIp, standardHeaders: true, legacyHeaders: false, store: new D1Store(`auth:${++storeSeq}:`), message: RATE_LIMITED, keyGenerator: (req) => `signin-ip:${ipKeyGenerator(req.ip ?? '')}` });
   const perAccount = rateLimit({
-    windowMs: RATE_WINDOW_MS, limit: o.perAccount, standardHeaders: true, legacyHeaders: false, message: RATE_LIMITED,
+    windowMs: RATE_WINDOW_MS, limit: o.perAccount, standardHeaders: true, legacyHeaders: false, store: new D1Store(`auth:${++storeSeq}:`), message: RATE_LIMITED,
     keyGenerator: (req) => `signin-acct:${ipKeyGenerator(req.ip ?? '')}:${String(req.body?.identifier ?? '').trim().toLowerCase().slice(0, 200)}`,
   });
   return { login: [perIp, perAccount], mfa: [perIp] };
@@ -82,8 +89,8 @@ export function makeRefreshLimiters(o: { perSession: number; anonymous: number }
       next(e);
     }
   };
-  const perSession = rateLimit({ windowMs: RATE_WINDOW_MS, limit: o.perSession, standardHeaders: true, legacyHeaders: false, message: RATE_LIMITED, skip: (req) => !known(req), keyGenerator: (req) => `fam:${(req as any).refreshFamily}` });
-  const anonymous = rateLimit({ windowMs: RATE_WINDOW_MS, limit: o.anonymous, standardHeaders: true, legacyHeaders: false, message: RATE_LIMITED, skip: known, keyGenerator: (req) => `anon:${ipKeyGenerator(req.ip ?? '')}` });
+  const perSession = rateLimit({ windowMs: RATE_WINDOW_MS, limit: o.perSession, standardHeaders: true, legacyHeaders: false, store: new D1Store(`auth:${++storeSeq}:`), message: RATE_LIMITED, skip: (req) => !known(req), keyGenerator: (req) => `fam:${(req as any).refreshFamily}` });
+  const anonymous = rateLimit({ windowMs: RATE_WINDOW_MS, limit: o.anonymous, standardHeaders: true, legacyHeaders: false, store: new D1Store(`auth:${++storeSeq}:`), message: RATE_LIMITED, skip: known, keyGenerator: (req) => `anon:${ipKeyGenerator(req.ip ?? '')}` });
   return [identify, perSession, anonymous];
 }
 const refreshLimiters = makeRefreshLimiters({ perSession: Number(process.env.REFRESH_RATE_LIMIT || 120), anonymous: Number(process.env.REFRESH_ANON_RATE_LIMIT || 300) });
@@ -121,7 +128,7 @@ async function registerFailure(req: Request, user: { id: string; name: string; e
   const s = await getSettings();
   const failed = user.failedLogins + 1;
   const lock = failed >= s.security.maxFailedLogins;
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     await tx.user.update({ where: { id: user.id }, data: { failedLogins: failed, lockedUntil: lock ? new Date(Date.now() + s.security.lockMinutes * 60_000) : undefined } });
     await securityEvent(tx, req, { event, userId: user.id, identifier, success: false });
     if (lock) await securityEvent(tx, req, { event: 'LOCKED', userId: user.id, identifier, success: false });
@@ -209,7 +216,7 @@ r.post('/refresh', ...refreshLimiters, ah(async (req, res) => {
   if (s.revokedAt) {
     if (s.revokedReason === 'ROTATED') {
       if (Date.now() - s.revokedAt.getTime() < REFRESH_RACE_GRACE_MS) throw new HttpError(401, 'Please retry.', 'REFRESH_RACE'); // parallel tabs
-      await prisma.$transaction(async (tx) => {
+      await atomic(async (tx) => {
         await tx.session.updateMany({ where: { familyId: s.familyId, revokedAt: null }, data: { revokedAt: new Date(), revokedReason: 'TOKEN_REUSE' } });
         await securityEvent(tx, req, { event: 'TOKEN_REUSE', userId: s.userId, success: false });
       });
@@ -224,7 +231,7 @@ r.post('/refresh', ...refreshLimiters, ah(async (req, res) => {
     throw expired();
   }
   if (!(await loadAuthUser(s.userId))) throw expired();
-  const next = await prisma.$transaction(async (tx) => {
+  const next = await atomic(async (tx) => {
     const rotated = await tx.session.updateMany({ where: { id: s.id, revokedAt: null }, data: { revokedAt: new Date(), revokedReason: 'ROTATED' } });
     if (rotated.count !== 1) throw new HttpError(401, 'Please retry.', 'REFRESH_RACE');
     return createSession(tx, { userId: s.userId, familyId: s.familyId, mfaVerified: s.mfaVerified, ip: req.ip, userAgent: req.get('user-agent'), createdAt: s.createdAt, expiresAt: s.expiresAt });
@@ -239,7 +246,7 @@ r.post('/logout', ah(async (req, res) => {
   const s = token ? await prisma.session.findUnique({ where: { refreshHash: sha256(token) } }) : null;
   if (s) {
     assertCsrfSafe(req);
-    await prisma.$transaction(async (tx) => {
+    await atomic(async (tx) => {
       await tx.session.updateMany({ where: { familyId: s.familyId, revokedAt: null }, data: { revokedAt: new Date(), revokedReason: 'LOGOUT' } });
       await securityEvent(tx, req, { event: 'LOGOUT', userId: s.userId, success: true });
     });
@@ -271,7 +278,7 @@ r.post('/mfa/enroll/confirm', authenticate, ah(async (req, res) => {
   const step = verifyTotp(decrypt(f.secretEnc), code);
   if (step === null) throw new HttpError(400, MFA_GENERIC, 'MFA_INVALID');
   const codes = Array.from({ length: 10 }, () => crypto.randomBytes(6).toString('hex'));
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     await tx.mfaFactor.update({ where: { id: f.id }, data: { confirmedAt: new Date(), lastUsedStep: step } });
     await tx.mfaRecoveryCode.deleteMany({ where: { userId: f.userId } });
     await tx.mfaRecoveryCode.createMany({ data: codes.map((c) => ({ userId: f.userId, codeHash: sha256(c) })) });
@@ -290,7 +297,7 @@ r.post('/change-password', authenticate, ah(async (req, res) => {
   if (!u.passwordHash.startsWith('$2') || !(await bcrypt.compare(currentPassword, u.passwordHash))) throw badRequest('Current password is incorrect.');
   assertPasswordPolicy(newPassword, { minLength: s.security.passwordMinLength, username: u.username, email: u.email, name: u.name });
   await assertNotReused(prisma, u.id, newPassword);
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     await setPassword(tx, u.id, newPassword);
     await revokeUserSessions(tx, u.id, 'PASSWORD_CHANGE', req.user!.sessionId);
     await securityEvent(tx, req, { event: 'PASSWORD_CHANGE', userId: u.id, success: true });
@@ -311,7 +318,7 @@ r.get('/sessions', authenticate, requireCompleteSession, ah(async (req, res) => 
 r.delete('/sessions/:id', authenticate, requireCompleteSession, ah(async (req, res) => {
   const s = await prisma.session.findFirst({ where: { id: req.params.id, userId: req.user!.id } });
   if (!s) throw new HttpError(404, 'Session not found.', 'NOT_FOUND');
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     await tx.session.updateMany({ where: { familyId: s.familyId, revokedAt: null }, data: { revokedAt: new Date(), revokedReason: 'USER_REVOKED' } });
     await securityEvent(tx, req, { event: 'SESSION_REVOKED', userId: req.user!.id, success: true });
   });
@@ -319,7 +326,7 @@ r.delete('/sessions/:id', authenticate, requireCompleteSession, ah(async (req, r
 }));
 r.post('/sessions/revoke-others', authenticate, requireCompleteSession, ah(async (req, res) => {
   const cur = await prisma.session.findUniqueOrThrow({ where: { id: req.user!.sessionId! } });
-  const n = await prisma.$transaction(async (tx) => {
+  const n = await atomic(async (tx) => {
     const x = await tx.session.updateMany({ where: { userId: req.user!.id, revokedAt: null, NOT: { familyId: cur.familyId } }, data: { revokedAt: new Date(), revokedReason: 'USER_REVOKED' } });
     await securityEvent(tx, req, { event: 'SESSION_REVOKED', userId: req.user!.id, success: true });
     return x.count;
@@ -335,7 +342,7 @@ r.post('/forgot-password', limiter, ah(async (req, res) => {
   if (user) {
     const token = randomToken(32);
     await prisma.passwordReset.create({ data: { userId: user.id, purpose: 'RESET', tokenHash: sha256(token), expiresAt: new Date(Date.now() + 30 * 60_000) } });
-    const link = `${config.publicAppUrl}/reset-password?token=${token}`;
+    const link = resetPasswordLink(token);
     notify('auth.password_reset', { userId: user.id, name: user.name, email: user.email, phone: user.phone }, { name: user.name, link }, { channels: ['EMAIL', 'WHATSAPP'], sensitive: true }).catch(() => undefined);
   }
   res.json({ ok: true, message: 'If an account exists, a reset link has been sent to the registered email / WhatsApp.' });
@@ -350,7 +357,7 @@ r.post('/reset-password', limiter, ah(async (req, res) => {
   if (!u.isActive) throw badRequest('This link is invalid or has expired. Please request a new one.');
   assertPasswordPolicy(newPassword, { minLength: s.security.passwordMinLength, username: u.username, email: u.email, name: u.name });
   await assertNotReused(prisma, u.id, newPassword);
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     const used = await tx.passwordReset.updateMany({ where: { id: row.id, usedAt: null }, data: { usedAt: new Date() } });
     if (used.count !== 1) throw badRequest('This link is invalid or has expired. Please request a new one.');
     await setPassword(tx, u.id, newPassword);
@@ -359,6 +366,49 @@ r.post('/reset-password', limiter, ah(async (req, res) => {
     await audit(tx, req, row.purpose === 'ENROLL' ? 'ACCOUNT_ACTIVATED' : 'PASSWORD_RESET', 'user', u.id);
   });
   res.json({ ok: true });
+}));
+
+/**
+ * One-time Super Administrator provisioning on Cloudflare (replaces `npm run admin:bootstrap` on a server).
+ * Enabled only while the secret BOOTSTRAP_TOKEN (≥ 32 random characters) is set on the Worker; send it in the
+ * X-Bootstrap-Token header. Same rules as the CLI: refused while an active Super Admin exists (except one
+ * `second` with a management nomination). Returns the single-use activation link. Delete the secret afterwards.
+ */
+/** BOOTSTRAP_TOKEN check shared by the bootstrap routes: 404 (route hidden) unless the header matches. */
+function assertBootstrapToken(req: Request) {
+  const expected = process.env.BOOTSTRAP_TOKEN ?? '';
+  const given = req.get('x-bootstrap-token') ?? '';
+  const ok = expected.length >= 32 && given.length === expected.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected));
+  if (!ok) throw new HttpError(404, 'Not found', 'NOT_FOUND');
+}
+
+r.post('/bootstrap', limiter, ah(async (req, res) => {
+  assertBootstrapToken(req);
+  const d = z.object({ email: z.string().email(), name: z.string().min(2), username: z.string().min(3), phone: z.string().optional(), second: z.boolean().optional(), nomination: z.string().optional() }).parse(req.body);
+  try {
+    const out = await bootstrapSuperAdmin(prisma as any, d, config.publicAppUrl);
+    res.status(201).json({ userId: out.userId, activationLink: out.link, expiresInMinutes: ACTIVATION_MINUTES, next: 'Open the link, set a password, then enrol an authenticator app. Then delete BOOTSTRAP_TOKEN from the Worker secrets.' });
+  } catch (e: any) {
+    if (e instanceof HttpError || e?.name === 'ZodError') throw e;
+    throw new HttpError(409, String(e?.message ?? e), 'BOOTSTRAP_REFUSED');
+  }
+}));
+
+/**
+ * STAGING ONLY: re-issue the activation link of the bootstrapped Super Administrator (lost or expired first link).
+ * Needs X-Bootstrap-Token and the account's username + email; refused (409) once the account has been activated.
+ * Not available in production (404 even with a token). See services/bootstrap.ts reissueActivation().
+ */
+r.post('/bootstrap/reissue-activation', limiter, ah(async (req, res) => {
+  if (!['staging', 'development', 'test'].includes(config.appEnv)) throw new HttpError(404, 'Not found', 'NOT_FOUND');
+  assertBootstrapToken(req);
+  try {
+    const out = await reissueActivation(prisma as any, req.body ?? {}, config.publicAppUrl, { ip: req.ip, userAgent: req.get('user-agent'), requestId: req.id });
+    res.status(201).json({ userId: out.userId, activationLink: out.link, expiresInMinutes: ACTIVATION_MINUTES, previousLinksInvalidated: out.previousLinksInvalidated });
+  } catch (e: any) {
+    if (e instanceof ReissueRefused) throw new HttpError(e.status, e.message, e.status === 404 ? 'NOT_FOUND' : 'REISSUE_REFUSED');
+    throw e;
+  }
 }));
 
 export default r;

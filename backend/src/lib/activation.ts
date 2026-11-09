@@ -3,13 +3,14 @@
  * NO password. They receive a link (default 72 h, configurable 1–168 h) to set their own password, which must
  * meet the policy; privileged roles then enrol MFA. Replaces temporary passwords sent by WhatsApp/email.
  */
-import type { Prisma } from '@prisma/client';
-import { config } from '../config';
+import type { Prisma } from '#prisma';
 import { prisma } from './prisma';
 import { getSettings } from './settings';
 import { randomToken, sha256 } from './util';
+import { type Tx } from './db';
+import { resetPasswordLink } from './links';
 
-type Db = Prisma.TransactionClient | typeof prisma;
+type Db = Tx | typeof prisma;
 
 export async function issueActivationLink(db: Db, userId: string, opts: { hours?: number } = {}) {
   const s = await getSettings();
@@ -18,12 +19,12 @@ export async function issueActivationLink(db: Db, userId: string, opts: { hours?
   await db.passwordReset.updateMany({ where: { userId, purpose: 'ENROLL', usedAt: null, expiresAt: { gt: new Date() } }, data: { expiresAt: new Date() } });
   const token = randomToken(32);
   await db.passwordReset.create({ data: { userId, purpose: 'ENROLL', tokenHash: sha256(token), expiresAt: new Date(Date.now() + hours * 3600_000) } });
-  return { link: `${config.publicAppUrl.replace(/\/$/, '')}/reset-password?token=${token}&activate=1`, hours, token };
+  return { link: resetPasswordLink(token, { activate: true }), hours, token };
 }
 
 export async function issueResetLink(db: Db, userId: string, minutes = 30) {
   await db.passwordReset.updateMany({ where: { userId, purpose: 'RESET', usedAt: null, expiresAt: { gt: new Date() } }, data: { expiresAt: new Date() } });
   const token = randomToken(32);
   await db.passwordReset.create({ data: { userId, purpose: 'RESET', tokenHash: sha256(token), expiresAt: new Date(Date.now() + minutes * 60_000) } });
-  return { link: `${config.publicAppUrl.replace(/\/$/, '')}/reset-password?token=${token}`, token };
+  return { link: resetPasswordLink(token), token };
 }

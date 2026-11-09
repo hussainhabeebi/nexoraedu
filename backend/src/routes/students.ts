@@ -1,9 +1,8 @@
 /** Student management (SRS §10). */
 import { Router, type Request } from 'express';
 import path from 'path';
-import fs from 'fs';
 import { z } from 'zod';
-import type { Prisma, StudentStatus } from '@prisma/client';
+import type { Prisma, StudentStatus } from '#prisma';
 import { prisma } from '../lib/prisma';
 import { ah, badRequest, forbidden, notFound, paging } from '../lib/http';
 import { can, userCan } from '../lib/auth';
@@ -12,12 +11,15 @@ import { audit } from '../lib/audit';
 import { nextNumber } from '../lib/sequence';
 import { getSettings } from '../lib/settings';
 import { normalizeEmail, normalizePhone, toCsv } from '../lib/util';
-import { upload, storedPath, verifyUploads } from '../lib/upload';
+import { upload, storedName, verifyUploads } from '../lib/upload';
+import { getFile } from '../lib/files';
+import { Readable } from 'node:stream';
 import { applicationDataSchema, admitApplication, assertBatchAvailable, assertNoDuplicateStudent, guardianSchema, educationSchema, validateApplicationData } from '../services/admissions';
 import { createApproval } from '../services/approvals';
 import { studentBalance } from '../services/finance';
 import { studentAttendancePct } from './academics';
 import { cancelEnrollment, syncEnrollmentWithStudentStatus } from '../services/enrollments';
+import { atomic } from '../lib/db';
 
 const r = Router();
 
@@ -40,9 +42,9 @@ r.get('/', can(...READ), ah(async (req, res) => {
     ...((req.query.from || req.query.to) && { admissionDate: { gte: req.query.from ? new Date(String(req.query.from)) : undefined, lte: req.query.to ? new Date(String(req.query.to)) : undefined } }),
     ...(q && {
       OR: [
-        { fullName: { contains: q, mode: 'insensitive' } },
-        { studentCode: { contains: q, mode: 'insensitive' } },
-        { email: { contains: q, mode: 'insensitive' } },
+        { fullName: { contains: q } },
+        { studentCode: { contains: q } },
+        { email: { contains: q } },
         { phoneNormalized: { contains: q.replace(/\D/g, '') || q } },
       ],
     }),
@@ -74,7 +76,7 @@ r.post('/', can('students:manage'), ah(async (req, res) => {
   validateApplicationData(data);
   if (!data.preferences.batchId) throw badRequest('Batch is mandatory.');
   const s = await getSettings();
-  const studentId = await prisma.$transaction(async (tx) => {
+  const studentId = await atomic(async (tx) => {
     await assertNoDuplicateStudent(tx, data.personal.phone, data.personal.email);
     await assertBatchAvailable(tx, data.preferences.batchId!, data.preferences.courseId);
     const code = await nextNumber('application:{year}', s.ids.application, tx);
@@ -90,7 +92,7 @@ r.post('/', can('students:manage'), ah(async (req, res) => {
 r.post('/check-duplicate', can('students:manage', 'leads:update'), ah(async (req, res) => {
   const { phone, email, fullName, dob } = z.object({ phone: z.string().optional(), email: z.string().optional(), fullName: z.string().optional(), dob: z.coerce.date().optional() }).parse(req.body);
   const exact = await prisma.student.findFirst({ where: { OR: [...(phone ? [{ phoneNormalized: normalizePhone(phone) }] : []), ...(email ? [{ emailNormalized: normalizeEmail(email)! }] : [])] }, select: { studentCode: true, fullName: true } });
-  const similar = fullName && dob ? await prisma.student.findMany({ where: { dob, fullName: { contains: fullName.split(' ')[0], mode: 'insensitive' } }, select: { studentCode: true, fullName: true }, take: 5 }) : [];
+  const similar = fullName && dob ? await prisma.student.findMany({ where: { dob, fullName: { contains: fullName.split(' ')[0] } }, select: { studentCode: true, fullName: true }, take: 5 }) : [];
   res.json({ duplicate: exact, similar });
 }));
 
@@ -138,7 +140,7 @@ r.patch('/:id', can('students:manage'), ah(async (req, res) => {
   const d = updateSchema.parse(req.body);
   const before = await prisma.student.findUniqueOrThrow({ where: { id: req.params.id } });
   if (d.phone || d.email) await assertNoDuplicateStudent(prisma, d.phone ?? before.phone, d.email ?? before.email, before.id);
-  const s = await prisma.$transaction(async (tx) => {
+  const s = await atomic(async (tx) => {
     const s = await tx.student.update({ where: { id: before.id }, data: { ...d, ...(d.phone && { phoneNormalized: normalizePhone(d.phone) }), ...(d.email && { emailNormalized: normalizeEmail(d.email)! }) } });
     await tx.studentHistory.create({ data: { studentId: s.id, type: 'PROFILE', message: `Profile updated: ${Object.keys(d).join(', ')}`, userId: req.user!.id } });
     await audit(tx, req, 'UPDATE', 'student', s.id, before, d);
@@ -152,7 +154,7 @@ r.post('/:id/status', can('students:manage', 'academics:manage'), ah(async (req,
   const { status, reason } = z.object({ status: z.enum(['APPLIED', 'ADMITTED', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'WITHDRAWN', 'TERMINATED']), reason: z.string().min(3) }).parse(req.body);
   const s = await prisma.student.findUniqueOrThrow({ where: { id: req.params.id } });
   let note: string | null = null;
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     // Enrollment history stays in step with the student status (E5); a re-activation opens a new enrollment.
     note = await syncEnrollmentWithStudentStatus(tx, s.id, s.status, status, reason, req.user!.id);
     await tx.student.update({ where: { id: s.id }, data: { status } });
@@ -195,7 +197,7 @@ r.get('/:id/enrollments', can(...READ), ah(async (req, res) => {
 r.post('/:id/enrollments/:eid/cancel', can('students:manage'), ah(async (req, res) => {
   const { reason } = z.object({ reason: z.string().min(5).max(500) }).parse(req.body);
   const s = await prisma.student.findUniqueOrThrow({ where: { id: req.params.id } });
-  const out = await prisma.$transaction(async (tx) => {
+  const out = await atomic(async (tx) => {
     const out = await cancelEnrollment(tx, { studentId: s.id, enrollmentId: req.params.eid, reason, actorId: req.user!.id });
     // No remaining current enrollment → the student is withdrawn (STU-13 has no "cancelled" student status).
     if (['ADMITTED', 'ACTIVE', 'ON_HOLD', 'APPLIED'].includes(s.status)) {
@@ -221,7 +223,7 @@ r.post('/:id/transfer', can('students:manage', 'academics:manage'), ah(async (re
   if (!cur) throw badRequest('The student has no current enrollment. Re-activate the student before a transfer.');
   if (cur.batchId === toBatchId) throw badRequest('The student is already enrolled in this batch.');
   await assertBatchAvailable(prisma, toBatchId, to.courseId);
-  const a = await prisma.$transaction(async (tx) => {
+  const a = await atomic(async (tx) => {
     const a = await createApproval(tx, { type: 'BATCH_TRANSFER', entityType: 'student', entityId: s.id, title: `Batch transfer: ${s.fullName} → ${to.code}`, payload: { toBatchId, reason }, requestedById: req.user!.id });
     await audit(tx, req, 'REQUEST_TRANSFER', 'student', s.id, { batchId: s.batchId }, { toBatchId, reason, approvalId: a.id });
     return a;
@@ -232,7 +234,7 @@ r.post('/:id/transfer', can('students:manage', 'academics:manage'), ah(async (re
 // Guardians / education
 r.post('/:id/guardians', can('students:manage'), ah(async (req, res) => {
   const d = guardianSchema.parse(req.body);
-  const g = await prisma.$transaction(async (tx) => {
+  const g = await atomic(async (tx) => {
     const g = await tx.guardian.create({ data: { ...d, email: d.email || null, studentId: req.params.id } });
     await audit(tx, req, 'CREATE', 'guardian', g.id, null, { studentId: req.params.id, ...d });
     return g;
@@ -240,7 +242,7 @@ r.post('/:id/guardians', can('students:manage'), ah(async (req, res) => {
   res.status(201).json(g);
 }));
 r.delete('/:id/guardians/:gid', can('students:manage'), ah(async (req, res) => {
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     const g = await tx.guardian.findFirst({ where: { id: req.params.gid, studentId: req.params.id } });
     if (!g) throw notFound('Guardian not found');
     await tx.guardian.delete({ where: { id: g.id } });
@@ -250,7 +252,7 @@ r.delete('/:id/guardians/:gid', can('students:manage'), ah(async (req, res) => {
 }));
 r.post('/:id/education', can('students:manage'), ah(async (req, res) => {
   const d = educationSchema.parse(req.body);
-  const e = await prisma.$transaction(async (tx) => {
+  const e = await atomic(async (tx) => {
     const e = await tx.education.create({ data: { ...d, studentId: req.params.id } });
     await audit(tx, req, 'CREATE', 'education', e.id, null, { studentId: req.params.id, ...d });
     return e;
@@ -258,7 +260,7 @@ r.post('/:id/education', can('students:manage'), ah(async (req, res) => {
   res.status(201).json(e);
 }));
 r.delete('/:id/education/:eid', can('students:manage'), ah(async (req, res) => {
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     const e = await tx.education.findFirst({ where: { id: req.params.eid, studentId: req.params.id } });
     if (!e) throw notFound('Record not found');
     await tx.education.delete({ where: { id: e.id } });
@@ -271,9 +273,9 @@ r.delete('/:id/education/:eid', can('students:manage'), ah(async (req, res) => {
 r.post('/:id/photo', can('students:manage'), upload.single('file'), verifyUploads, ah(async (req, res) => {
   if (!req.file || !req.file.mimetype.startsWith('image/')) throw badRequest('Please upload a JPG or PNG image.');
   const file = req.file;
-  const s = await prisma.$transaction(async (tx) => {
+  const s = await atomic(async (tx) => {
     const before = await tx.student.findUniqueOrThrow({ where: { id: req.params.id }, select: { photoUrl: true } });
-    const s = await tx.student.update({ where: { id: req.params.id }, data: { photoUrl: `/api/v1/files/${path.basename(file.path)}` } });
+    const s = await tx.student.update({ where: { id: req.params.id }, data: { photoUrl: `/api/v1/files/${file.filename}` } });
     await audit(tx, req, 'UPDATE_PHOTO', 'student', s.id, before, { photoUrl: s.photoUrl });
     return s;
   });
@@ -283,8 +285,8 @@ r.post('/:id/documents', can('students:manage'), upload.single('file'), verifyUp
   const { type } = z.object({ type: z.string().min(1) }).parse(req.body);
   if (!req.file) throw badRequest('Please choose a file to upload.');
   const file = req.file;
-  const doc = await prisma.$transaction(async (tx) => {
-    const doc = await tx.document.create({ data: { studentId: req.params.id, type, fileName: file.originalname, storagePath: path.basename(file.path), mimeType: file.mimetype, size: file.size } });
+  const doc = await atomic(async (tx) => {
+    const doc = await tx.document.create({ data: { studentId: req.params.id, type, fileName: file.originalname, storagePath: file.filename, mimeType: file.mimetype, size: file.size } });
     await tx.studentHistory.create({ data: { studentId: req.params.id, type: 'DOCUMENT', message: `Document uploaded: ${type}`, userId: req.user!.id } });
     await audit(tx, req, 'UPLOAD', 'document', doc.id, null, { studentId: req.params.id, type, size: file.size, mimeType: file.mimetype });
     return doc;
@@ -299,7 +301,7 @@ documentsRouter.get('/pending', can('documents:verify'), ah(async (_req, res) =>
 documentsRouter.post('/:id/verify', can('documents:verify'), ah(async (req, res) => {
   const { status, remarks } = z.object({ status: z.enum(['VERIFIED', 'REJECTED']), remarks: z.string().optional() }).parse(req.body);
   if (status === 'REJECTED' && !remarks) throw badRequest('Please give a reason for rejection.');
-  const d = await prisma.$transaction(async (tx) => {
+  const d = await atomic(async (tx) => {
     const before = await tx.document.findUniqueOrThrow({ where: { id: req.params.id }, select: { status: true, remarks: true } });
     const d = await tx.document.update({ where: { id: req.params.id }, data: { status, remarks, verifiedById: req.user!.id, verifiedAt: new Date() } });
     if (d.studentId) await tx.studentHistory.create({ data: { studentId: d.studentId, type: 'DOCUMENT', message: `Document ${d.type} ${status.toLowerCase()}${remarks ? `: ${remarks}` : ''}`, userId: req.user!.id } });
@@ -312,15 +314,16 @@ documentsRouter.get('/:id/download', can('documents:verify', 'students:manage'),
   const d = await prisma.document.findUnique({ where: { id: req.params.id } });
   // S6 / FR-DOC-02: object-level check; out-of-scope documents look identical to missing ones.
   if (!d || !(await canAccessDocument(req.user!, d))) throw notFound('Document not found');
-  const p = storedPath(d.storagePath);
-  if (!fs.existsSync(p)) throw notFound('File missing from storage');
+  const obj = await getFile(storedName(d.storagePath));
+  if (!obj) throw notFound('File missing from storage');
   await audit(prisma, req, 'DOWNLOAD', 'document', d.id, null, { studentId: d.studentId, applicationId: d.applicationId, type: d.type });
   const safeName = d.fileName.replace(/[^\w.\- ]/g, '_');
   res.setHeader('Content-Type', d.mimeType);
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Cache-Control', 'private, no-store');
   res.setHeader('Content-Disposition', `${d.mimeType.startsWith('image/') ? 'inline' : 'attachment'}; filename="${safeName}"`);
-  fs.createReadStream(p).pipe(res);
+  res.setHeader('Content-Length', String(obj.size));
+  Readable.fromWeb(obj.body as any).pipe(res);
 }));
 
 export default r;

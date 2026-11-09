@@ -50,7 +50,7 @@ const STUDENT: Role[] = ['student'];
 const MATRIX: Record<string, Exp> = {
   // ── Sign-in & self-service ──
   'POST /auth/login': PUBLIC, 'POST /auth/mfa/verify': PUBLIC, 'POST /auth/refresh': PUBLIC, 'POST /auth/logout': PUBLIC,
-  'POST /auth/forgot-password': PUBLIC, 'POST /auth/reset-password': PUBLIC,
+  'POST /auth/forgot-password': PUBLIC, 'POST /auth/bootstrap': PUBLIC, 'POST /auth/bootstrap/reissue-activation': PUBLIC, 'POST /auth/reset-password': PUBLIC,
   'GET /auth/me': ALL, 'POST /auth/mfa/enroll/start': ALL, 'POST /auth/mfa/enroll/confirm': ALL, 'POST /auth/change-password': ALL,
   'GET /auth/sessions': ALL, 'DELETE /auth/sessions/:id': ALL, 'POST /auth/sessions/revoke-others': ALL, // SELF
   'GET /notifications': ALL, 'POST /notifications/read': ALL, // SELF

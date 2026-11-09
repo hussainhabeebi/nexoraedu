@@ -11,14 +11,15 @@
  *  - Each decision stores IP address and user agent (APR-10).
  */
 import type { Request } from 'express';
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '#prisma';
 import { prisma } from '../lib/prisma';
 import { audit } from '../lib/audit';
 import { badRequest, forbidden, HttpError, notFound } from '../lib/http';
 import type { AuthUser } from '../lib/auth';
 import { notifyRole, notifyUser } from './notify';
+import { atomic, type Tx } from '../lib/db';
+import { background } from '../lib/background';
 
-type Tx = Prisma.TransactionClient;
 type Level = { level: number; role: string; minAmount?: number };
 
 type Handler = {
@@ -92,7 +93,7 @@ export async function createApproval(
       status: 'PENDING',
     },
   });
-  setImmediate(() => notifyRole(levels[0].role, `Approval needed: ${APPROVAL_TYPES[p.type] ?? p.type}`, p.title, `/staff/approvals/${req.id}`).catch(() => undefined));
+  background(() => notifyRole(levels[0].role, `Approval needed: ${APPROVAL_TYPES[p.type] ?? p.type}`, p.title, `/staff/approvals/${req.id}`).catch(() => undefined));
   return req;
 }
 
@@ -114,10 +115,10 @@ export function canView(user: AuthUser, r: { requestedById: string; levels: any 
 export async function actOnApproval(id: string, req: Request, action: 'APPROVE' | 'REJECT' | 'RETURN', comment: string | undefined) {
   const user = req.user!;
   if ((action === 'REJECT' || action === 'RETURN') && !comment?.trim()) throw badRequest('A comment is required when rejecting or returning a request.');
-  return prisma.$transaction(async (tx) => {
-    // Row lock: serialises concurrent decisions on the same request.
-    const locked = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM approval_requests WHERE id = ${id} FOR UPDATE`;
-    if (!locked.length) throw notFound('Approval request not found');
+  return atomic(async (tx) => {
+    // Serialises concurrent decisions on the same request (was SELECT … FOR UPDATE).
+    await tx.lock(`approval:${id}`);
+    if (!(await tx.approvalRequest.count({ where: { id } }))) throw notFound('Approval request not found');
     const r = await tx.approvalRequest.findUniqueOrThrow({ where: { id }, include: { actions: true } });
     if (r.requestedById === user.id) throw forbidden('You cannot approve your own request.');
     if (!canActOn(user, r)) throw forbidden('This request is not awaiting your approval.');
@@ -142,7 +143,7 @@ export async function actOnApproval(id: string, req: Request, action: 'APPROVE' 
     if (status === 'REJECTED' || status === 'RETURNED') await h.onReject?.(tx, r, user.id);
     await audit(tx, req, `APPROVAL_${action}`, 'approval_request', id, { status: r.status, level: r.currentLevel }, { status, level: currentLevel, comment, type: r.type, entityId: r.entityId });
 
-    setImmediate(() => {
+    background(() => {
       const label = APPROVAL_TYPES[r.type] ?? r.type;
       if (status === 'PENDING') notifyRole(levels[currentLevel - 1].role, `Approval needed: ${label}`, r.title, `/staff/approvals/${id}`).catch(() => undefined);
       else notifyUser(r.requestedById, `${label} ${status.toLowerCase()}`, `${r.title}${comment ? ` — "${comment}"` : ''}`, `/staff/approvals/${id}`).catch(() => undefined);

@@ -1,13 +1,13 @@
 /** Finance domain: fee plans, invoices, payments, allocations and the immutable ledger (SRS §12). */
-import { Prisma } from '@prisma/client';
+import { Prisma } from '#prisma';
 import { prisma } from '../lib/prisma';
 import { badRequest, conflict, notFound } from '../lib/http';
 import { nextNumber } from '../lib/sequence';
 import { getSettings } from '../lib/settings';
 import { money } from '../lib/util';
 import { addMonthsClamped, endOfDayUtc, parseIsoDate, toCalendarDate, type CalendarDate } from '../lib/caldate';
+import { type Tx, type ReadDb } from '../lib/db';
 
-type Tx = Prisma.TransactionClient;
 
 /** Installments that still carry an unpaid amount. SUPERSEDED ones (replaced by a custom plan) and PAID ones never do. */
 export const OPEN_INSTALLMENT_STATUSES = ['DUE', 'PARTIAL'];
@@ -17,7 +17,7 @@ export async function ledger(tx: Tx, e: { studentId: string; type: string; debit
   return tx.ledgerEntry.create({ data: { ...e, debit: e.debit ?? 0, credit: e.credit ?? 0 } });
 }
 
-export async function studentBalance(studentId: string, tx: Tx = prisma) {
+export async function studentBalance(studentId: string, tx: ReadDb = prisma) {
   const agg = await tx.ledgerEntry.aggregate({ where: { studentId }, _sum: { debit: true, credit: true } });
   return money(Number(agg._sum.debit ?? 0) - Number(agg._sum.credit ?? 0));
 }
@@ -91,7 +91,7 @@ export async function outstandingInstallments(tx: Tx, studentId: string) {
 /** FIN-05/06: record a payment, allocate FIFO to installments, post ledger, issue receipt number. */
 /** Serialises all money movements on one student account (FIN-05/13, 8.4): prevents parallel overpayment. */
 export async function lockStudentAccount(tx: Tx, studentId: string) {
-  await tx.$queryRaw`SELECT id FROM students WHERE id = ${studentId} FOR UPDATE`;
+  await tx.lock(`student:${studentId}`); // serialises money changes for one student (was SELECT … FOR UPDATE)
 }
 
 export async function recordPayment(

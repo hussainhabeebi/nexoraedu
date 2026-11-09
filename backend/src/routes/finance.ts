@@ -1,6 +1,6 @@
 /** Finance (SRS §12). Ledger is immutable — corrections are reversing entries only. */
 import { Router } from 'express';
-import PDFDocument from 'pdfkit';
+import PDFDocument from '../lib/pdf';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { ah, badRequest, notFound, paging } from '../lib/http';
@@ -14,6 +14,8 @@ import { createApproval } from '../services/approvals';
 import { ACTIVE_REFUND_STATUSES, assertCancellationKeepsRefundsCovered, courseFee, createFeePlan, ledger, lockStudentAccount, recordPayment, studentBalance } from '../services/finance';
 import { earlierPlansForCourse, feeEnrollmentChain, requestFeeAdjustment, requestRebill } from '../services/feeAdjustments';
 import { notifyLater } from '../services/notify';
+import { atomic } from '../lib/db';
+import { dbDate } from '../lib/db';
 
 const r = Router();
 
@@ -62,14 +64,14 @@ r.post('/students/:id/fee-plan', can('finance:manage'), ah(async (req, res) => {
   const earlier = await earlierPlansForCourse(prisma as any, st.id, st.courseId, chain);
   if (earlier.length && (await courseFee(prisma as any, st.courseId)).gross > 0) {
     if (!reason) throw badRequest('This student was already billed for this course. Give a reason: the new plan needs approval.', { needsApproval: true });
-    const out = await prisma.$transaction(async (tx) => {
+    const out = await atomic(async (tx) => {
       const out = await requestRebill(tx, { studentId: st.id, plan: { enrollmentId: enrollment.id, courseId: st.courseId, installments, startDate: startDate instanceof Date ? startDate.toISOString() : startDate }, earlierPlanId: earlier[earlier.length - 1].id, reason, requestedById: req.user!.id });
       await audit(tx, req, 'CREATE', 'fee_adjustment', out.adjustment.id, null, { kind: 'REBILL', studentId: st.id, installments, startDate, amount: Number(out.adjustment.amount), earlierPlanIds: earlier.map((p) => p.id), approvalId: out.approval.id });
       return out;
     });
     return res.status(202).json({ needsApproval: true, ...out });
   }
-  const plan = await prisma.$transaction(async (tx) => {
+  const plan = await atomic(async (tx) => {
     const plan = await createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments, startDate, userId: req.user!.id });
     await audit(tx, req, 'CREATE', 'fee_plan', plan.id, null, { studentId: st.id, installments, startDate });
     return plan;
@@ -90,7 +92,7 @@ r.post('/payments', can('finance:collect'), ah(async (req, res) => {
   const d = paymentSchema.parse(req.body);
   if (['CHEQUE', 'BANK_TRANSFER', 'UPI', 'CARD'].includes(d.mode) && !d.reference) throw badRequest('Reference number is required for this payment mode.');
   const key = req.get('Idempotency-Key') || undefined;
-  const p = await prisma.$transaction(async (tx) => {
+  const p = await atomic(async (tx) => {
     const before = key ? await tx.payment.findUnique({ where: { idempotencyKey: key }, select: { id: true } }) : null;
     const p = await recordPayment(tx, { ...d, idempotencyKey: key, userId: req.user!.id });
     if (!before) await audit(tx, req, 'CREATE', 'payment', p.id, null, { ...d, receiptNumber: p.receiptNumber });
@@ -109,7 +111,7 @@ r.get('/payments', can('finance:read'), ah(async (req, res) => {
     ...(req.query.status && { status: String(req.query.status) }),
     ...(req.query.studentId && { studentId: String(req.query.studentId) }),
     ...((req.query.from || req.query.to) && { paidAt: { gte: req.query.from ? new Date(String(req.query.from)) : undefined, lte: req.query.to ? new Date(String(req.query.to) + 'T23:59:59') : undefined } }),
-    ...(req.query.q && { OR: [{ receiptNumber: { contains: String(req.query.q), mode: 'insensitive' } }, { reference: { contains: String(req.query.q), mode: 'insensitive' } }, { student: { fullName: { contains: String(req.query.q), mode: 'insensitive' } } }] }),
+    ...(req.query.q && { OR: [{ receiptNumber: { contains: String(req.query.q) } }, { reference: { contains: String(req.query.q) } }, { student: { fullName: { contains: String(req.query.q) } } }] }),
   };
   const include = { student: { select: { id: true, fullName: true, studentCode: true } } };
   if (req.query.format === 'csv') {
@@ -164,7 +166,7 @@ r.post('/payments/:id/cancel-request', can('finance:collect'), ah(async (req, re
   const { reason } = z.object({ reason: z.string().min(5) }).parse(req.body);
   const p = await prisma.payment.findUniqueOrThrow({ where: { id: req.params.id }, include: { student: true } });
   if (p.status !== 'POSTED') throw badRequest(`Payment is already ${p.status.toLowerCase().replace('_', ' ')}.`);
-  const a = await prisma.$transaction(async (tx) => {
+  const a = await atomic(async (tx) => {
     await lockStudentAccount(tx, p.studentId);
     await assertCancellationKeepsRefundsCovered(tx, p); // B1: refunds must stay covered by the remaining receipts
     const moved = await tx.payment.updateMany({ where: { id: p.id, status: 'POSTED' }, data: { status: 'CANCEL_REQUESTED' } });
@@ -189,7 +191,7 @@ r.post('/discounts', can('finance:collect', 'finance:manage'), ah(async (req, re
   const amount = money(d.kind === 'PERCENT' ? (Number(plan.grossAmount) * Math.min(d.value, 100)) / 100 : d.value);
   if (amount > unpaid + 0.001) throw badRequest(`Discount (${amount}) cannot exceed the unpaid amount (${money(unpaid)}).`);
   const st = await prisma.student.findUniqueOrThrow({ where: { id: d.studentId } });
-  const result = await prisma.$transaction(async (tx) => {
+  const result = await atomic(async (tx) => {
     const disc = await tx.discount.create({ data: { ...d, amount, feePlanId: plan.id, requestedById: req.user!.id } });
     // FIN-09 / decision 5 (2026-11-05): every discount and scholarship goes through the configured approval
     // workflow — there is no automatic exemption, for any role or amount.
@@ -210,7 +212,7 @@ r.post('/adjustments', can('finance:collect', 'finance:manage'), ah(async (req, 
     z.object({ kind: z.literal('WAIVER'), studentId: z.string(), feePlanId: z.string(), amount: z.coerce.number().positive(), reason: z.string().trim().min(5).max(500) }),
     z.object({ kind: z.literal('RESCHEDULE'), studentId: z.string(), feePlanId: z.string(), schedule: z.array(scheduleRow).min(1).max(24), reason: z.string().trim().min(5).max(500) }),
   ]).parse(req.body);
-  const out = await prisma.$transaction(async (tx) => {
+  const out = await atomic(async (tx) => {
     const out = await requestFeeAdjustment(tx, { ...d, requestedById: req.user!.id });
     await audit(tx, req, 'CREATE', 'fee_adjustment', out.adjustment.id, null, { ...d, amount: Number(out.adjustment.amount), approvalId: out.approval.id });
     return out;
@@ -227,7 +229,7 @@ r.get('/adjustments', can('finance:read'), ah(async (req, res) => {
 r.post('/refunds', can('finance:collect', 'finance:manage'), ah(async (req, res) => {
   const d = z.object({ studentId: z.string(), amount: z.coerce.number().positive(), reason: z.string().min(5) }).parse(req.body);
   const st = await prisma.student.findUniqueOrThrow({ where: { id: d.studentId } });
-  const out = await prisma.$transaction(async (tx) => {
+  const out = await atomic(async (tx) => {
     // Same lock as receipt cancellation (B1), so a refund and a cancellation cannot both pass the checks at once.
     await lockStudentAccount(tx, d.studentId);
     const paid = await tx.payment.aggregate({ where: { studentId: d.studentId, status: 'POSTED' }, _sum: { amount: true } });
@@ -245,7 +247,7 @@ r.post('/refunds/:id/pay', can('finance:manage'), ah(async (req, res) => {
   const { reference } = z.object({ reference: z.string().min(2) }).parse(req.body);
   const rf = await prisma.refund.findUniqueOrThrow({ where: { id: req.params.id } });
   if (rf.status !== 'APPROVED') throw badRequest('Only approved refunds can be paid.');
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     // Conditional transition prevents paying the same refund twice under concurrency.
     const paid = await tx.refund.updateMany({ where: { id: rf.id, status: 'APPROVED' }, data: { status: 'PAID', reference, paidAt: new Date() } });
     if (paid.count !== 1) throw badRequest('Only approved refunds can be paid.');
@@ -306,15 +308,15 @@ r.get('/collections', can('finance:read'), ah(async (req, res) => {
   const [byMode, rows] = await Promise.all([
     prisma.payment.groupBy({ by: ['mode'], where, _sum: { amount: true }, _count: true }),
     prisma.$queryRaw<{ day: Date; amount: number; count: bigint }[]>`
-      SELECT date_trunc('day', "paidAt") AS day, SUM(amount)::float AS amount, COUNT(*) AS count FROM payments
-      WHERE status <> 'CANCELLED' AND "paidAt" BETWEEN ${from} AND ${to} GROUP BY 1 ORDER BY 1`,
+      SELECT substr("paidAt", 1, 10) AS day, SUM(amount) AS amount, COUNT(*) AS count FROM payments
+      WHERE status <> 'CANCELLED' AND "paidAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)} GROUP BY 1 ORDER BY 1`,
   ]);
   const byCourse = await prisma.$queryRaw<{ course: string; amount: number }[]>`
-    SELECT c.name AS course, SUM(p.amount)::float AS amount FROM payments p JOIN students s ON s.id = p."studentId" JOIN courses c ON c.id = s."courseId"
-    WHERE p.status <> 'CANCELLED' AND p."paidAt" BETWEEN ${from} AND ${to} GROUP BY 1 ORDER BY 2 DESC`;
+    SELECT c.name AS course, SUM(p.amount) AS amount FROM payments p JOIN students s ON s.id = p."studentId" JOIN courses c ON c.id = s."courseId"
+    WHERE p.status <> 'CANCELLED' AND p."paidAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)} GROUP BY 1 ORDER BY 2 DESC`;
   const byCollector = await prisma.$queryRaw<{ collector: string; amount: number }[]>`
-    SELECT COALESCE(u.name, 'Online') AS collector, SUM(p.amount)::float AS amount FROM payments p LEFT JOIN users u ON u.id = p."recordedById"
-    WHERE p.status <> 'CANCELLED' AND p."paidAt" BETWEEN ${from} AND ${to} GROUP BY 1 ORDER BY 2 DESC`;
+    SELECT COALESCE(u.name, 'Online') AS collector, SUM(p.amount) AS amount FROM payments p LEFT JOIN users u ON u.id = p."recordedById"
+    WHERE p.status <> 'CANCELLED' AND p."paidAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)} GROUP BY 1 ORDER BY 2 DESC`;
   res.json({
     from, to,
     total: money(byMode.reduce((s, m) => s + Number(m._sum.amount ?? 0), 0)),

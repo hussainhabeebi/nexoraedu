@@ -1,8 +1,8 @@
 /** Examination (SRS §13): question bank, scheduling, assignment, evaluation, results, certificates. */
 import { Router } from 'express';
-import PDFDocument from 'pdfkit';
+import PDFDocument from '../lib/pdf';
 import { z } from 'zod';
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '#prisma';
 import { prisma } from '../lib/prisma';
 import { ah, badRequest, conflict, notFound, paging } from '../lib/http';
 import { can, userCan } from '../lib/auth';
@@ -16,9 +16,9 @@ import { autoGrade, computeResult } from '../services/exams';
 import { notifyLater } from '../services/notify';
 import { studentBalance } from '../services/finance';
 import { studentAttendancePct } from './academics';
+import { atomic, type Tx } from '../lib/db';
 
 const r = Router();
-type Tx = Prisma.TransactionClient;
 
 // ── Question bank (EXM-03/04/05) ──
 const questionSchema = z.object({
@@ -54,7 +54,7 @@ r.get('/questions', can('exams:read'), ah(async (req, res) => {
     ...(req.query.type && { type: String(req.query.type) }),
     ...(req.query.difficulty && { difficulty: String(req.query.difficulty) }),
     status: req.query.status ? String(req.query.status) : 'ACTIVE',
-    ...(req.query.q && { text: { contains: String(req.query.q), mode: 'insensitive' } }),
+    ...(req.query.q && { text: { contains: String(req.query.q) } }),
   };
   const [items, total] = await Promise.all([prisma.question.findMany({ where, skip, take, orderBy: { createdAt: 'desc' }, include: { _count: { select: { exams: true } } } }), prisma.question.count({ where })]);
   // S12: answer keys are visible only to exam managers (Examination Officer / Super Admin).
@@ -142,7 +142,7 @@ r.post('/exams', can('exams:manage'), ah(async (req, res) => {
   if (d.endAt <= d.startAt) throw badRequest('Exam window end must be after start.');
   if (d.passMarks > d.totalMarks) throw badRequest('Pass marks cannot exceed total marks.');
   const code = await nextNumber('exam:{year}', 'EX-{YYYY}-####');
-  const e = await prisma.$transaction(async (tx) => {
+  const e = await atomic(async (tx) => {
     const e = await tx.exam.create({ data: { ...d, code } });
     await audit(tx, req, 'CREATE', 'exam', e.id, null, d);
     return e;
@@ -154,7 +154,7 @@ r.patch('/exams/:id', can('exams:manage'), ah(async (req, res) => {
   const before = await prisma.exam.findUniqueOrThrow({ where: { id: req.params.id }, include: { _count: { select: { attempts: true } } } });
   if (before._count.attempts > 0) throw conflict('This exam already has attempts and cannot be edited.');
   const d = examSchema.partial().parse(req.body);
-  const e = await prisma.$transaction(async (tx) => {
+  const e = await atomic(async (tx) => {
     const e = await tx.exam.update({ where: { id: before.id }, data: d });
     await audit(tx, req, 'UPDATE', 'exam', e.id, before, d);
     return e;
@@ -171,7 +171,10 @@ r.put('/exams/:id/questions', can('exams:manage'), ah(async (req, res) => {
     const pool = await prisma.question.findMany({ where: { courseId: exam.courseId, status: 'ACTIVE', ...(random.difficulty && { difficulty: random.difficulty }), ...(random.subjectId && { subjectId: random.subjectId }) }, select: { id: true } });
     ids = pool.sort(() => Math.random() - 0.5).slice(0, random.count).map((q) => q.id);
   }
-  await prisma.$transaction([prisma.examQuestion.deleteMany({ where: { examId: exam.id } }), prisma.examQuestion.createMany({ data: ids.map((questionId, i) => ({ examId: exam.id, questionId, order: i + 1 })) })]);
+  await atomic(async (tx) => {
+    await tx.examQuestion.deleteMany({ where: { examId: exam.id } });
+    await tx.examQuestion.createMany({ data: ids.map((questionId, i) => ({ examId: exam.id, questionId, order: i + 1 })) });
+  });
   const qs = await prisma.question.findMany({ where: { id: { in: ids } }, select: { marks: true } });
   res.json({ count: ids.length, marks: qs.reduce((s, q) => s + q.marks, 0) });
 }));
@@ -205,7 +208,10 @@ r.post('/exams/:id/assign', can('exams:manage'), ah(async (req, res) => {
     if (reasons.length) ineligible.push({ studentId: id, reasons });
     else assigned.push(id);
   }
-  await prisma.examAssignment.createMany({ data: assigned.map((studentId) => ({ examId: exam.id, studentId })), skipDuplicates: true });
+  // SQLite has no createMany skipDuplicates: insert only students that are not assigned yet.
+  const already = new Set((await prisma.examAssignment.findMany({ where: { examId: exam.id, studentId: { in: assigned } }, select: { studentId: true } })).map((x) => x.studentId));
+  const fresh = assigned.filter((s) => !already.has(s));
+  if (fresh.length) await prisma.examAssignment.createMany({ data: fresh.map((studentId) => ({ examId: exam.id, studentId })) });
   res.json({ assigned: assigned.length, ineligible });
 }));
 
@@ -213,7 +219,7 @@ r.post('/exams/:id/exception', can('exams:manage'), ah(async (req, res) => {
   const { studentId, reason, reattempt } = z.object({ studentId: z.string(), reason: z.string().min(3), reattempt: z.boolean().default(false) }).parse(req.body);
   const exam = await prisma.exam.findUniqueOrThrow({ where: { id: req.params.id } });
   const st = await prisma.student.findUniqueOrThrow({ where: { id: studentId } });
-  const a = await prisma.$transaction((tx) => createApproval(tx, { type: 'EXAM_REATTEMPT', entityType: 'exam', entityId: exam.id, title: `${reattempt ? 'Re-attempt' : 'Eligibility exception'}: ${st.fullName} — ${exam.title}`, payload: { examId: exam.id, studentId, reason, reattempt }, requestedById: req.user!.id }));
+  const a = await atomic((tx) => createApproval(tx, { type: 'EXAM_REATTEMPT', entityType: 'exam', entityId: exam.id, title: `${reattempt ? 'Re-attempt' : 'Eligibility exception'}: ${st.fullName} — ${exam.title}`, payload: { examId: exam.id, studentId, reason, reattempt }, requestedById: req.user!.id }));
   res.json({ approval: a });
 }));
 
@@ -221,7 +227,7 @@ r.post('/exams/:id/schedule', can('exams:manage'), ah(async (req, res) => {
   const exam = await prisma.exam.findUniqueOrThrow({ where: { id: req.params.id }, include: { _count: { select: { questions: true } }, assignments: true } });
   if (exam.mode === 'ONLINE' && exam._count.questions === 0) throw badRequest('Add questions before scheduling an online exam.');
   if (!exam.assignments.length) throw badRequest('Assign students before scheduling.');
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     await tx.exam.update({ where: { id: exam.id }, data: { status: 'SCHEDULED' } });
     await audit(tx, req, 'SCHEDULE', 'exam', exam.id, { status: exam.status }, { status: 'SCHEDULED', students: exam.assignments.length });
   });
@@ -249,7 +255,7 @@ r.post('/attempts/:id/evaluate', can('exams:manage'), ah(async (req, res) => {
     if (m > q.marks) throw badRequest(`Marks for a question cannot exceed ${q.marks}.`);
   }
   const manual = Object.values(marks).reduce((s, m) => s + m, 0);
-  const u = await prisma.$transaction(async (tx) => {
+  const u = await atomic(async (tx) => {
     const u = await tx.examAttempt.update({ where: { id: a.id }, data: { manualMarks: marks, manualScore: manual, status: 'EVALUATED' } });
     await audit(tx, req, 'EVALUATE', 'exam_attempt', a.id, { manualMarks: a.manualMarks, manualScore: a.manualScore }, { marks, manualScore: manual });
     return u;
@@ -271,7 +277,7 @@ r.post('/exams/:id/marks', can('exams:manage'), ah(async (req, res) => {
   const exam = await prisma.exam.findUniqueOrThrow({ where: { id: req.params.id } });
   const bad = entries.find((e) => e.marks > exam.totalMarks);
   if (bad) throw badRequest(`Marks cannot exceed the maximum of ${exam.totalMarks}.`);
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     const before = await tx.result.findMany({ where: { examId: exam.id, studentId: { in: entries.map((e) => e.studentId) } }, select: { studentId: true, marks: true } });
     for (const e of entries) await upsertResult(tx, exam, e.studentId, e.marks);
     await audit(tx, req, 'MARKS_ENTRY', 'exam', exam.id, before, entries); // 24.6: field-level old/new marks
@@ -289,7 +295,7 @@ r.post('/exams/:id/process', can('exams:manage'), ah(async (req, res) => {
     const total = (a.autoScore ?? 0) + (a.manualScore ?? 0);
     best.set(a.studentId, Math.max(best.get(a.studentId) ?? 0, total));
   }
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     for (const [sid, m] of best) await upsertResult(tx, exam, sid, Math.min(m, exam.totalMarks));
     await tx.exam.update({ where: { id: exam.id }, data: { status: 'COMPLETED' } });
     await audit(tx, req, 'PROCESS_RESULTS', 'exam', exam.id, null, { processed: best.size });
@@ -298,7 +304,7 @@ r.post('/exams/:id/process', can('exams:manage'), ah(async (req, res) => {
 }));
 
 r.post('/exams/:id/lock', can('exams:manage'), ah(async (req, res) => {
-  const u = await prisma.$transaction(async (tx) => {
+  const u = await atomic(async (tx) => {
     const u = await tx.result.updateMany({ where: { examId: req.params.id }, data: { locked: true } });
     await audit(tx, req, 'LOCK', 'exam_results', req.params.id, null, { count: u.count });
     return u;
@@ -309,7 +315,7 @@ r.post('/exams/:id/lock', can('exams:manage'), ah(async (req, res) => {
 r.post('/exams/:id/publish', can('exams:manage'), ah(async (req, res) => {
   const exam = await prisma.exam.findUniqueOrThrow({ where: { id: req.params.id }, include: { results: { include: { student: true } } } });
   if (!exam.results.length) throw badRequest('No results to publish.');
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     await tx.result.updateMany({ where: { examId: exam.id }, data: { locked: true } });
     await tx.exam.update({ where: { id: exam.id }, data: { resultsPublished: true, status: 'COMPLETED' } });
     await audit(tx, req, 'PUBLISH', 'exam_results', exam.id, null, { results: exam.results.length });
@@ -328,7 +334,7 @@ r.post('/results/:id/correction', can('exams:manage', 'materials:manage'), ah(as
   // Faculty may request corrections only for exams of their own batches (22.7).
   if (!rs || (!userCan(req, 'exams:manage') && !(await canAccessBatch(req.user!, rs.exam.batchId)))) throw notFound('Result not found');
   if (newMarks > rs.exam.totalMarks) throw badRequest(`Marks cannot exceed ${rs.exam.totalMarks}.`);
-  const a = await prisma.$transaction((tx) => createApproval(tx, { type: 'RESULT_CORRECTION', entityType: 'result', entityId: rs.id, title: `Result correction: ${rs.student.fullName} — ${rs.exam.title} (${rs.marks} → ${newMarks})`, payload: { oldMarks: rs.marks, newMarks, reason, evidence }, requestedById: req.user!.id }));
+  const a = await atomic((tx) => createApproval(tx, { type: 'RESULT_CORRECTION', entityType: 'result', entityId: rs.id, title: `Result correction: ${rs.student.fullName} — ${rs.exam.title} (${rs.marks} → ${newMarks})`, payload: { oldMarks: rs.marks, newMarks, reason, evidence }, requestedById: req.user!.id }));
   res.json({ approval: a });
 }));
 
@@ -348,7 +354,7 @@ r.post('/certificates', can('exams:manage'), ah(async (req, res) => {
   const existing = await prisma.certificate.findFirst({ where: { studentId, courseId: st.courseId, status: { in: ['ISSUED', 'PENDING_APPROVAL'] } } });
   if (existing) throw conflict(`Certificate ${existing.number} already ${existing.status === 'ISSUED' ? 'issued' : 'pending approval'}.`);
   const s = await getSettings();
-  const out = await prisma.$transaction(async (tx) => {
+  const out = await atomic(async (tx) => {
     const number = await nextNumber('certificate:{year}', s.ids.certificate, tx);
     const c = await tx.certificate.create({ data: { number, studentId, courseId: st.courseId, verificationCode: randomToken(9).toUpperCase().replace(/[^A-Z0-9]/g, 'X').slice(0, 10) } });
     const a = await createApproval(tx, { type: 'CERTIFICATE', entityType: 'certificate', entityId: c.id, title: `Certificate ${number} — ${st.fullName} (${st.course.name})`, requestedById: req.user!.id });

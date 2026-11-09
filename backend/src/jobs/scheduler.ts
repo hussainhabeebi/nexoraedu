@@ -1,5 +1,6 @@
 /** Workflow automation (SRS §5.7): fee reminders, follow-up reminders, inactivity alerts, exam auto-submit. */
 import { prisma } from '../lib/prisma';
+import { purgeExpiredRateLimits } from '../lib/rate-store';
 import { getSettings } from '../lib/settings';
 import { money } from '../lib/util';
 import { dayDiff, formatDate, toCalendarDate, zonedTimeToUtc } from '../lib/caldate';
@@ -74,22 +75,27 @@ export async function runExamSweeper() {
   return n;
 }
 
-let started = false;
-export function startScheduler() {
-  if (started) return;
-  started = true;
-  const safe = (name: string, fn: () => Promise<unknown>) => () => fn().catch((e) => console.error(`[job ${name}]`, e));
-  setInterval(safe('crm', runCrmReminders), 5 * 60_000);
-  setInterval(safe('exam', runExamSweeper), 60_000);
-  let lastDaily = '';
-  setInterval(safe('daily', async () => {
-    const now = new Date();
-    const key = now.toDateString();
-    if (now.getHours() >= 9 && lastDaily !== key) {
-      lastDaily = key;
-      await runFeeReminders();
-      await runDailyDigest();
+/**
+ * Cron Triggers (wrangler.jsonc `triggers.crons`, times in UTC):
+ *   * * * * *     exam auto-submit sweeper (EXM-09)
+ *   *\/5 * * * *  CRM follow-up reminders (CRM-08/09)
+ *   30 3 * * *    09:00 India time: fee reminders (FIN-08) and the daily digest
+ * Every job is safe to run again (reminders are marked as sent), so a retried or overlapping run sends nothing twice.
+ */
+export async function runScheduled(cron: string, _at: Date = new Date()) {
+  if (process.env.JOBS_ENABLED === 'false') return;
+  const safe = async (name: string, fn: () => Promise<unknown>) => {
+    try {
+      await fn();
+    } catch (e) {
+      console.error(`[job ${name}]`, e);
     }
-  }), 10 * 60_000);
-  console.log('[scheduler] started');
+  };
+  if (cron === '* * * * *') await safe('exam', runExamSweeper);
+  else if (cron === '*/5 * * * *') await safe('crm', runCrmReminders);
+  else if (cron === '30 3 * * *') {
+    await safe('fees', () => runFeeReminders());
+    await safe('digest', runDailyDigest);
+    await safe('rate-limits', purgeExpiredRateLimits);
+  } else console.warn(`[scheduler] no job for cron "${cron}"`);
 }

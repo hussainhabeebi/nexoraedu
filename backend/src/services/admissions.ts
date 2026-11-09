@@ -1,5 +1,5 @@
 /** Application → Admission → Student conversion without re-entry (CRM-12/13/14, STU-01). */
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '#prisma';
 import { z } from 'zod';
 import { badRequest, conflict } from '../lib/http';
 import { nextNumber } from '../lib/sequence';
@@ -10,8 +10,8 @@ import { issueActivationLink } from '../lib/activation';
 import { createFeePlan } from './finance';
 import { openEnrollment } from './enrollments';
 import { notifyLater } from './notify';
+import { type Tx, type ReadDb } from '../lib/db';
 
-type Tx = Prisma.TransactionClient;
 
 export const guardianSchema = z.object({
   name: z.string().min(2),
@@ -40,7 +40,8 @@ export const applicationDataSchema = z.object({
   guardians: z.array(guardianSchema).default([]),
   education: z.array(educationSchema).default([]),
   preferences: z.object({ courseId: z.string(), batchId: z.string().optional().nullable(), mode: z.string().optional() }),
-  declaration: z.literal(true).optional(),
+  // Staff registration has no declaration checkbox and may send false; the public application route requires true.
+  declaration: z.boolean().optional(),
 });
 export type ApplicationData = z.infer<typeof applicationDataSchema>;
 
@@ -57,7 +58,7 @@ export function validateApplicationData(d: ApplicationData) {
 }
 
 /** STU-03 duplicate detection by phone & email. */
-export async function assertNoDuplicateStudent(tx: Tx, phone: string, email: string, exceptId?: string) {
+export async function assertNoDuplicateStudent(tx: ReadDb, phone: string, email: string, exceptId?: string) {
   const dup = await tx.student.findFirst({
     where: { OR: [{ phoneNormalized: normalizePhone(phone) }, { emailNormalized: normalizeEmail(email)! }], NOT: exceptId ? { id: exceptId } : undefined },
     select: { studentCode: true, fullName: true },
@@ -66,10 +67,10 @@ export async function assertNoDuplicateStudent(tx: Tx, phone: string, email: str
 }
 
 /** STU-09 capacity + course match. */
-export async function assertBatchAvailable(tx: Tx, batchId: string, courseId: string) {
-  // Lock the batch row so parallel admissions/transfers cannot overfill it (STU-09). Inside a transaction the
-  // lock is held until commit; outside one (pre-checks) it is released immediately and the check is advisory.
-  await tx.$queryRaw`SELECT id FROM batches WHERE id = ${batchId} FOR UPDATE`;
+export async function assertBatchAvailable(tx: ReadDb, batchId: string, courseId: string) {
+  // Lock the batch so parallel admissions/transfers cannot overfill it (STU-09). Inside atomic() a concurrent
+  // admission to the same batch makes one of them retry with the new count; outside (pre-checks) it is advisory.
+  if (typeof (tx as any).lock === 'function') await (tx as any).lock(`batch:${batchId}`);
   const b = await tx.batch.findUnique({ where: { id: batchId }, include: { _count: { select: { students: { where: { status: { in: ['ADMITTED', 'ACTIVE', 'ON_HOLD'] } } } } } } });
   if (!b) throw badRequest('Selected batch does not exist.');
   if (b.courseId !== courseId) throw badRequest('Selected batch does not belong to the chosen course.');

@@ -1,7 +1,7 @@
 /** Administration (SRS §9): users, roles, departments, masters, settings, workflows, templates, logs. */
 import { Router, type Request } from 'express';
 import { z } from 'zod';
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '#prisma';
 import { prisma } from '../lib/prisma';
 import { ah, badRequest, conflict, forbidden, paging } from '../lib/http';
 import { bumpAuthVersion, can, isSuperAdmin, revokeUserSessions } from '../lib/auth';
@@ -14,6 +14,7 @@ import { normalizeEmail } from '../lib/util';
 import { isValidTimeZone } from '../lib/caldate';
 import { notifyLater } from '../services/notify';
 import { APPROVAL_TYPES, assertWorkflowLevels, createApproval, MANDATORY_APPROVAL_TYPES } from '../services/approvals';
+import { atomic, type Tx } from '../lib/db';
 
 const r = Router();
 
@@ -24,7 +25,7 @@ r.get('/users', can('users:read'), ah(async (req, res) => {
   const role = req.query.role ? String(req.query.role) : undefined;
   const where: any = {
     roles: role ? { some: { role: { key: role } } } : { none: { role: { key: 'student' } } },
-    ...(q && { OR: [{ name: { contains: q, mode: 'insensitive' } }, { email: { contains: q, mode: 'insensitive' } }, { username: { contains: q, mode: 'insensitive' } }] }),
+    ...(q && { OR: [{ name: { contains: q } }, { email: { contains: q } }, { username: { contains: q } }] }),
     ...(req.query.active && { isActive: req.query.active === 'true' }),
   };
   const [items, total] = await Promise.all([
@@ -73,7 +74,7 @@ function assertOverrides(req: Request, extra?: string[]) {
 }
 
 /** SRS 22.2: privileged grants are applied only after a second Super Administrator approves (APR-03). */
-async function requestPrivilegedGrant(tx: Prisma.TransactionClient, req: Request, userId: string, name: string, add: string[]) {
+async function requestPrivilegedGrant(tx: Tx, req: Request, userId: string, name: string, add: string[]) {
   return createApproval(tx, { type: 'USER_PRIVILEGE', entityType: 'user', entityId: userId, title: `Grant ${add.join(', ')} to ${name}`, payload: { add }, requestedById: req.user!.id });
 }
 
@@ -83,7 +84,7 @@ r.post('/users', can('users:manage'), ah(async (req, res) => {
   assertOverrides(req, d.extraPermissions);
   const direct = roles.filter((x) => !isPrivilegedRole(x.key));
   const pending = roles.filter((x) => isPrivilegedRole(x.key)).map((x) => x.key);
-  const out = await prisma.$transaction(async (tx) => {
+  const out = await atomic(async (tx) => {
     const u = await tx.user.create({
       data: {
         name: d.name, email: normalizeEmail(d.email)!, username: d.username.toLowerCase(), phone: d.phone, designation: d.designation,
@@ -128,7 +129,7 @@ r.patch('/users/:id', can('users:manage'), ah(async (req, res) => {
   const identityChanged = (d.email && normalizeEmail(d.email) !== before.email) || (d.username && d.username.toLowerCase() !== before.username);
   const accessChanged = !!applyRoles || d.extraPermissions !== undefined || d.isActive === false || identityChanged;
 
-  const approval = await prisma.$transaction(async (tx) => {
+  const approval = await atomic(async (tx) => {
     await tx.user.update({
       where: { id: before.id },
       data: {
@@ -159,7 +160,7 @@ r.post('/users/:id/reset-password', can('users:manage'), ah(async (req, res) => 
   if (target.id === req.user!.id) throw badRequest('Use "Change password" for your own account.');
   assertCanManage(req, roleKeysOf(target));
   // Decision 8: never reveal or send a password; the user receives a single-use reset link (24 h for admin-initiated resets).
-  const link = await prisma.$transaction(async (tx) => {
+  const link = await atomic(async (tx) => {
     const l = await issueResetLink(tx, target.id, 24 * 60);
     await revokeUserSessions(tx, target.id, 'ADMIN_RESET');
     await bumpAuthVersion(tx, target.id);
@@ -176,7 +177,7 @@ r.post('/users/:id/resend-activation', can('users:manage'), ah(async (req, res) 
   assertCanManage(req, roleKeysOf(target));
   if (target.passwordHash.startsWith('$2')) throw badRequest('This account is already activated. Use "Reset password" instead.');
   if (!target.isActive) throw badRequest('This account is deactivated.');
-  const act = await prisma.$transaction(async (tx) => {
+  const act = await atomic(async (tx) => {
     const a = await issueActivationLink(tx, target.id);
     await audit(tx, req, 'RESEND_ACTIVATION', 'user', target.id, null, { hours: a.hours });
     return a;
@@ -190,7 +191,7 @@ r.post('/users/:id/mfa/reset', can('users:manage'), ah(async (req, res) => {
   if (!isSuperAdmin(req.user)) throw forbidden('Only a Super Administrator can reset two-factor authentication.');
   if (req.params.id === req.user!.id) throw badRequest('You cannot reset your own two-factor authentication.');
   const target = await prisma.user.findUniqueOrThrow({ where: { id: req.params.id } });
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     await tx.mfaFactor.deleteMany({ where: { userId: target.id } });
     await tx.mfaRecoveryCode.deleteMany({ where: { userId: target.id } });
     await revokeUserSessions(tx, target.id, 'MFA_RESET');
@@ -211,7 +212,7 @@ r.post('/users/import', can('users:manage'), ah(async (req, res) => {
       if (priv.length) throw new Error(`Privileged roles cannot be bulk-imported (${priv.join(', ')})`);
       const roles = await prisma.role.findMany({ where: { key: { in: d.roles } } });
       if (roles.length !== d.roles.length) throw new Error('Unknown role');
-      const created = await prisma.$transaction(async (tx) => {
+      const created = await atomic(async (tx) => {
         const u = await tx.user.create({ data: { name: d.name, email: normalizeEmail(d.email)!, username: d.username.toLowerCase(), phone: d.phone, designation: d.designation, passwordHash: UNUSABLE_PASSWORD, mustChangePassword: false, roles: { create: roles.map((x) => ({ roleId: x.id })) } } });
         const act = await issueActivationLink(tx, u.id);
         await audit(tx, req, 'CREATE', 'user', u.id, null, { ...d, via: 'import' });
@@ -242,7 +243,7 @@ r.post('/roles', can('roles:manage'), ah(async (req, res) => {
   const d = z.object({ key: z.string().regex(/^[a-z_]+$/), name: z.string(), description: z.string().optional(), permissions: z.array(z.string()).default([]) }).parse(req.body);
   if (isPrivilegedRole(d.key)) throw badRequest('This role key is reserved.');
   assertPermissionList(d.permissions);
-  const role = await prisma.$transaction(async (tx) => {
+  const role = await atomic(async (tx) => {
     const role = await tx.role.create({ data: d });
     await audit(tx, req, 'CREATE', 'role', role.id, null, d);
     return role;
@@ -255,7 +256,7 @@ r.patch('/roles/:id', can('roles:manage'), ah(async (req, res) => {
   const before = await prisma.role.findUniqueOrThrow({ where: { id: req.params.id } });
   if (before.key === 'super_admin') throw badRequest('The Super Administrator role cannot be modified.');
   if (d.permissions) assertPermissionList(d.permissions);
-  const role = await prisma.$transaction(async (tx) => {
+  const role = await atomic(async (tx) => {
     const role = await tx.role.update({ where: { id: req.params.id }, data: d });
     // Permission changes take effect on the holders' next request.
     if (d.permissions) await tx.user.updateMany({ where: { roles: { some: { roleId: role.id } } }, data: { authVersion: { increment: 1 } } });
@@ -269,7 +270,7 @@ r.delete('/roles/:id', can('roles:manage'), ah(async (req, res) => {
   const role = await prisma.role.findUniqueOrThrow({ where: { id: req.params.id }, include: { _count: { select: { users: true } } } });
   if (role.isSystem) throw badRequest('System roles cannot be deleted.');
   if (role._count.users > 0) throw conflict('This role is assigned to users and cannot be deleted.'); // ADM-02
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     await tx.role.delete({ where: { id: role.id } });
     await audit(tx, req, 'DELETE', 'role', role.id, role);
   });
@@ -282,7 +283,7 @@ r.get('/departments', can('users:read', 'masters:manage'), ah(async (_req, res) 
 }));
 r.post('/departments', can('masters:manage'), ah(async (req, res) => {
   const d = z.object({ name: z.string().min(2), headId: z.string().optional().nullable() }).parse(req.body);
-  const dep = await prisma.$transaction(async (tx) => {
+  const dep = await atomic(async (tx) => {
     const dep = await tx.department.create({ data: d });
     await audit(tx, req, 'CREATE', 'department', dep.id, null, d);
     return dep;
@@ -291,7 +292,7 @@ r.post('/departments', can('masters:manage'), ah(async (req, res) => {
 }));
 r.patch('/departments/:id', can('masters:manage'), ah(async (req, res) => {
   const d = z.object({ name: z.string().optional(), headId: z.string().nullable().optional(), isActive: z.boolean().optional() }).parse(req.body);
-  const dep = await prisma.$transaction(async (tx) => {
+  const dep = await atomic(async (tx) => {
     const before = await tx.department.findUniqueOrThrow({ where: { id: req.params.id } });
     const dep = await tx.department.update({ where: { id: req.params.id }, data: d });
     await audit(tx, req, 'UPDATE', 'department', dep.id, before, d);
@@ -308,7 +309,7 @@ r.get('/masters', ah(async (req, res) => {
 }));
 r.post('/masters', can('masters:manage'), ah(async (req, res) => {
   const d = z.object({ type: z.enum(MASTER_TYPES), code: z.string().regex(/^[a-z0-9_]+$/), label: z.string(), sortOrder: z.number().int().optional() }).parse(req.body);
-  const m = await prisma.$transaction(async (tx) => {
+  const m = await atomic(async (tx) => {
     const m = await tx.masterItem.create({ data: d });
     await audit(tx, req, 'CREATE', 'master', m.id, null, d);
     return m;
@@ -317,7 +318,7 @@ r.post('/masters', can('masters:manage'), ah(async (req, res) => {
 }));
 r.patch('/masters/:id', can('masters:manage'), ah(async (req, res) => {
   const d = z.object({ label: z.string().optional(), isActive: z.boolean().optional(), sortOrder: z.number().int().optional() }).parse(req.body);
-  const m = await prisma.$transaction(async (tx) => {
+  const m = await atomic(async (tx) => {
     const before = await tx.masterItem.findUniqueOrThrow({ where: { id: req.params.id } });
     const m = await tx.masterItem.update({ where: { id: req.params.id }, data: d });
     await audit(tx, req, 'UPDATE', 'master', m.id, before, d);
@@ -340,7 +341,7 @@ r.put('/settings/:key', can('settings:manage'), ah(async (req, res) => {
     const sec = z.object({ sessionTimeoutMin: z.number().int().min(5).max(240), passwordMinLength: z.number().int().min(MIN_LENGTH_FLOOR).max(64), maxFailedLogins: z.number().int().min(3).max(10), lockMinutes: z.number().int().min(5).max(1440), activationHours: z.number().int().min(1).max(168) }).parse(value);
     Object.assign(value, sec);
   }
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     await tx.setting.upsert({ where: { key }, create: { key, value }, update: { value } });
     await audit(tx, req, 'UPDATE', 'setting', key, before, value);
   });
@@ -360,7 +361,7 @@ r.put('/workflows/:type', can('settings:manage'), ah(async (req, res) => {
   if (d.isActive === false && (MANDATORY_APPROVAL_TYPES as readonly string[]).includes(req.params.type)) throw badRequest('This approval workflow is mandatory and cannot be deactivated.');
   await assertWorkflowLevels(prisma, d.levels);
   const before = await prisma.approvalWorkflow.findUnique({ where: { type: req.params.type } });
-  const wf = await prisma.$transaction(async (tx) => {
+  const wf = await atomic(async (tx) => {
     const wf = await tx.approvalWorkflow.upsert({
       where: { type: req.params.type },
       create: { type: req.params.type, name: d.name ?? APPROVAL_TYPES[req.params.type] ?? req.params.type, levels: d.levels, isActive: d.isActive ?? true },
@@ -379,7 +380,7 @@ r.get('/templates', can('notifications:manage', 'settings:manage'), ah(async (_r
 r.patch('/templates/:id', can('notifications:manage'), ah(async (req, res) => {
   const d = z.object({ name: z.string().optional(), subject: z.string().nullable().optional(), body: z.string().optional(), waTemplateName: z.string().nullable().optional(), waLanguage: z.string().optional(), channels: z.array(z.enum(['IN_APP', 'EMAIL', 'WHATSAPP'])).optional(), isActive: z.boolean().optional() }).parse(req.body);
   const before = await prisma.notificationTemplate.findUniqueOrThrow({ where: { id: req.params.id } });
-  const t = await prisma.$transaction(async (tx) => {
+  const t = await atomic(async (tx) => {
     const t = await tx.notificationTemplate.update({ where: { id: req.params.id }, data: { ...d, version: { increment: 1 } } });
     await audit(tx, req, 'UPDATE', 'notification_template', t.id, before, d);
     return t;

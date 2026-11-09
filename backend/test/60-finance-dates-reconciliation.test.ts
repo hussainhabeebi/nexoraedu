@@ -11,6 +11,7 @@ import { reconcile } from '../src/services/reconciliation';
 import { nextNumber } from '../src/lib/sequence';
 import { invalidateSettings } from '../src/lib/settings';
 import { runFeeReminders } from '../src/jobs/scheduler';
+import { atomic } from '../src/lib/db';
 
 const c = (s: string) => parseIsoDate(s)!;
 const dates = (start: string, n: number, tz = 'Asia/Kolkata') => buildInstallmentSchedule(1000, n, c(start), tz).map((x) => isoDate(x.calendarDate));
@@ -100,7 +101,7 @@ describe('Fee plans in the database', () => {
 
   it('plan from 31 Jan uses the policy, records it, and invoices match the installments', async () => {
     const st = await makeStudent({});
-    const plan = await prisma.$transaction((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 4, startDate: '2027-01-31' }));
+    const plan = await atomic((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 4, startDate: '2027-01-31' }));
     expect(plan).toMatchObject({ dueAnchorDay: 31, dueTimeZone: 'Asia/Kolkata' });
     const ins = await prisma.installment.findMany({ where: { feePlanId: plan.id }, orderBy: { seq: 'asc' } });
     expect(ins.map((i) => isoDate(toCalendarDate(i.dueDate, 'Asia/Kolkata')))).toEqual(['2027-01-31', '2027-02-28', '2027-03-31', '2027-04-30']);
@@ -123,7 +124,7 @@ describe('Fee plans in the database', () => {
 
   it('changing the academy time zone affects new plans only; existing due dates are untouched', async () => {
     const st1 = await makeStudent({});
-    const p1 = await prisma.$transaction((tx) => createFeePlan(tx, { studentId: st1.id, courseId: st1.courseId, installments: 2, startDate: '2027-05-31' }));
+    const p1 = await atomic((tx) => createFeePlan(tx, { studentId: st1.id, courseId: st1.courseId, installments: 2, startDate: '2027-05-31' }));
     const before = (await prisma.installment.findMany({ where: { feePlanId: p1.id }, orderBy: { seq: 'asc' } })).map((i) => i.dueDate.toISOString());
     const sa = await sessionFor('owner2');
     expect((await request(app).put('/api/v1/admin/settings/academy').set(as(sa)).send({ timeZone: 'Mars/Olympus' })).status).toBe(400);
@@ -131,7 +132,7 @@ describe('Fee plans in the database', () => {
     try {
       invalidateSettings();
       const st2 = await makeStudent({});
-      const p2 = await prisma.$transaction((tx) => createFeePlan(tx, { studentId: st2.id, courseId: st2.courseId, installments: 2, startDate: '2027-05-31' }));
+      const p2 = await atomic((tx) => createFeePlan(tx, { studentId: st2.id, courseId: st2.courseId, installments: 2, startDate: '2027-05-31' }));
       expect(p2.dueTimeZone).toBe('America/New_York');
       const ins2 = await prisma.installment.findMany({ where: { feePlanId: p2.id }, orderBy: { seq: 'asc' } });
       expect(ins2.map((i) => i.dueDate.toISOString())).toEqual(['2027-06-01T03:59:59.999Z', '2027-07-01T03:59:59.999Z']); // 31 May, 30 Jun (EDT)
@@ -146,7 +147,7 @@ describe('Fee plans in the database', () => {
 
   it('partial payments: FIFO allocation, statuses and outstanding balance', async () => {
     const st = await makeStudent({});
-    const plan = await prisma.$transaction((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 3, startDate: '2027-01-31' }));
+    const plan = await atomic((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 3, startDate: '2027-01-31' }));
     const ins = await prisma.installment.findMany({ where: { feePlanId: plan.id }, orderBy: { seq: 'asc' } });
     const first = Number(ins[0].amount);
     const pay = (amount: number, key: string) => request(app).post('/api/v1/finance/payments').set(as(accounts)).set('Idempotency-Key', key).send({ studentId: st.id, amount, mode: 'UPI', reference: key });
@@ -169,8 +170,8 @@ describe('Fee plans in the database', () => {
     const y = new Date(Date.UTC(today.y, today.m - 1, today.d) - 864e5);
     const stA = await makeStudent({});
     const stB = await makeStudent({});
-    await prisma.$transaction((tx) => createFeePlan(tx, { studentId: stA.id, courseId: stA.courseId, installments: 1, startDate: isoDate(today) }));
-    await prisma.$transaction((tx) => createFeePlan(tx, { studentId: stB.id, courseId: stB.courseId, installments: 1, startDate: isoDate({ y: y.getUTCFullYear(), m: y.getUTCMonth() + 1, d: y.getUTCDate() }) }));
+    await atomic((tx) => createFeePlan(tx, { studentId: stA.id, courseId: stA.courseId, installments: 1, startDate: isoDate(today) }));
+    await atomic((tx) => createFeePlan(tx, { studentId: stB.id, courseId: stB.courseId, installments: 1, startDate: isoDate({ y: y.getUTCFullYear(), m: y.getUTCMonth() + 1, d: y.getUTCDate() }) }));
     expect(yesterday).toEqual(today);
     const out = await request(app).get('/api/v1/finance/outstanding').set(as(fin));
     const a = out.body.items.find((i: any) => i.studentId === stA.id);
@@ -184,7 +185,7 @@ describe('Fee plans in the database', () => {
     const tz = 'Asia/Kolkata';
     const today = toCalendarDate(new Date(), tz);
     const st = await makeStudent({});
-    await prisma.$transaction((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 1, startDate: isoDate(today) }));
+    await atomic((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 1, startDate: isoDate(today) }));
     await runFeeReminders();
     const logs = await prisma.notificationLog.findMany({ where: { recipient: st.email } });
     expect(logs.map((l) => l.templateKey)).toContain('fee.reminder_upcoming');
@@ -196,7 +197,7 @@ describe('Fee plans in the database', () => {
 
   it('concurrent partial payments never exceed the balance and stay reconciled', async () => {
     const st = await makeStudent({});
-    const plan = await prisma.$transaction((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 2, startDate: '2027-01-31' }));
+    const plan = await atomic((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 2, startDate: '2027-01-31' }));
     const total = Number(plan.grossAmount);
     const part = Math.floor((total * 0.3) * 100) / 100;
     const res = await Promise.all(Array.from({ length: 5 }, (_, i) => request(app).post('/api/v1/finance/payments').set(as(accounts)).set('Idempotency-Key', `cp-${st.id}-${i}`).send({ studentId: st.id, amount: part, mode: 'CASH' })));
@@ -215,7 +216,7 @@ describe('Reconciliation', () => {
 
   it('clean after the full money lifecycle: partial payment, cancellation, discount, refund', async () => {
     const st = await makeStudent({});
-    await prisma.$transaction((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 3, startDate: '2027-01-31' }));
+    await atomic((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 3, startDate: '2027-01-31' }));
     const [accounts, sa] = await Promise.all([sessionFor('accounts'), sessionFor('owner2')]);
     const p1 = await request(app).post('/api/v1/finance/payments').set(as(accounts)).send({ studentId: st.id, amount: 7000, mode: 'CASH' });
     const p2 = await request(app).post('/api/v1/finance/payments').set(as(accounts)).send({ studentId: st.id, amount: 3000, mode: 'UPI', reference: 'UPI-REC-1' });
@@ -240,12 +241,20 @@ describe('Reconciliation', () => {
 
   it('detects tampering and inconsistencies without changing anything', async () => {
     const st = await makeStudent({});
-    const plan = await prisma.$transaction((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 2, startDate: '2027-01-31' }));
-    const pay = await prisma.$transaction((tx) => recordPayment(tx, { studentId: st.id, amount: 2500, mode: 'CASH' }));
+    const plan = await atomic((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 2, startDate: '2027-01-31' }));
+    const pay = await atomic((tx) => recordPayment(tx, { studentId: st.id, amount: 2500, mode: 'CASH' }));
     const ins = await prisma.installment.findFirstOrThrow({ where: { feePlanId: plan.id, seq: 1 } });
     // Simulated corruption (synthetic): paid amount edited outside the payment flow, an allocation removed,
     // an orphan ledger entry, a missing invoice.
-    await prisma.installment.update({ where: { id: ins.id }, data: { paidAmount: 999999, status: 'PAID' } });
+    // The database itself refuses paid > amount; simulate someone bypassing that rule (direct DB access).
+    const [guard] = await prisma.$queryRawUnsafe<{ sql: string }[]>(`SELECT sql FROM sqlite_master WHERE name = 'installments_paid_le_amount_update'`);
+    await expect(prisma.installment.update({ where: { id: ins.id }, data: { paidAmount: 999999 } })).rejects.toThrow(/paid_le_amount/);
+    await prisma.$executeRawUnsafe('DROP TRIGGER "installments_paid_le_amount_update"');
+    try {
+      await prisma.installment.update({ where: { id: ins.id }, data: { paidAmount: 999999, status: 'PAID' } });
+    } finally {
+      await prisma.$executeRawUnsafe(guard.sql);
+    }
     await prisma.paymentAllocation.deleteMany({ where: { paymentId: pay.id } });
     await prisma.ledgerEntry.create({ data: { studentId: st.id, type: 'PAYMENT', credit: 1, refType: 'payment', refId: 'does-not-exist', narration: 'Orphan' } });
     await prisma.invoice.deleteMany({ where: { installmentId: ins.id } });
@@ -280,7 +289,7 @@ describe('Reconciliation', () => {
     expect(r.issues.find((i) => i.rule === 'R12_DUE_DATE_POLICY')?.severity).toBe('INFO');
     expect((await prisma.installment.findMany({ where: { feePlanId: plan.id }, orderBy: { seq: 'asc' } })).map((i) => i.dueDate.toISOString())).toEqual(before);
     // Legacy plans still accept payments normally.
-    await prisma.$transaction((tx) => recordPayment(tx, { studentId: st.id, amount: 1500, mode: 'CASH' }));
+    await atomic((tx) => recordPayment(tx, { studentId: st.id, amount: 1500, mode: 'CASH' }));
     expect((await reconcile({ studentId: st.id })).ok).toBe(true);
   });
 

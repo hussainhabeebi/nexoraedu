@@ -3,7 +3,7 @@
  * Runs first: the seeded test database contains NO Super Administrator; this file creates them via the real
  * bootstrap command (SEC-T01…T05; SRS SEC-01, SEC-04, ADM-01, DEP-02, DEP-11, DEP-18).
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcryptjs';
 import { app, prisma } from './helpers';
@@ -40,7 +40,6 @@ describe('R1 seed & defaults', () => {
     expect(productionConfigProblems({ ...STRONG, APP_ENCRYPTION_KEY: '0'.repeat(64) } as any, 'production').join()).toMatch(/APP_ENCRYPTION_KEY/);
     expect(productionConfigProblems({ ...STRONG, PUBLIC_APP_URL: 'http://localhost:5173' } as any, 'production').join()).toMatch(/PUBLIC_APP_URL/);
     expect(productionConfigProblems({ ...STRONG, CORS_ORIGINS: 'https://a.org,http://localhost:5173' } as any, 'production').join()).toMatch(/CORS/);
-    expect(productionConfigProblems({ ...STRONG, PROXY_SECRET: '' } as any, 'production').join()).toMatch(/PROXY_SECRET/);
     expect(productionConfigProblems({ ...STRONG, SEED_ADMIN_PASSWORD: 'x' } as any, 'production').join()).toMatch(/SEED_ADMIN_PASSWORD/);
     expect(productionConfigProblems({} as any, 'development')).toEqual([]);
     expect(databaseIsolationProblem('postgresql://u:p@prod-db.internal:5432/x', 'staging', ['prod-db.internal'])).toMatch(/must not use/);
@@ -66,7 +65,7 @@ describe('R1 Super Administrator bootstrap', () => {
     // Decision 4: the second Super Admin needs a recorded management nomination.
     await expect(bootstrapSuperAdmin(prisma as any, { email: 'second@example.invalid', name: 'Second Admin', username: 'owner2', second: true }, 'https://x')).rejects.toThrow(/nomination/);
     await bootstrapSuperAdmin(prisma as any, { email: 'second@example.invalid', name: 'Second Admin', username: 'owner2', second: true, nomination: 'TEST-NOMINATION-001' }, 'https://x');
-    const row = await prisma.auditLog.findFirstOrThrow({ where: { action: 'BOOTSTRAP_SUPER_ADMIN', newValues: { path: ['second'], equals: true } } });
+    const row = await prisma.auditLog.findFirstOrThrow({ where: { action: 'BOOTSTRAP_SUPER_ADMIN', newValues: { path: '$.second', equals: true } } });
     expect((row.newValues as any).nomination).toBe('TEST-NOMINATION-001');
     await expect(bootstrapSuperAdmin(prisma as any, { email: 'third@example.invalid', name: 'Third Admin', username: 'owner3', second: true, nomination: 'TEST-NOMINATION-002' }, 'https://x')).rejects.toThrow(/exactly one/);
   });
@@ -98,5 +97,48 @@ describe('R1 Super Administrator bootstrap', () => {
     expect((await prisma.user.findUniqueOrThrow({ where: { username: 'admin' } })).isActive).toBe(false);
     expect(await prisma.auditLog.count({ where: { action: 'DEACTIVATE_LEGACY_ACCOUNT' } })).toBe(1);
     expect((await request(app).post('/api/v1/auth/login').send({ identifier: 'admin', password: LEGACY_DEFAULT_PASSWORD })).status).toBe(401);
+  });
+});
+
+describe('Cloudflare bootstrap endpoint (POST /auth/bootstrap)', () => {
+  const body = { email: 'late@example.invalid', name: 'Late Admin', username: 'lateadmin' };
+  it('is invisible without the BOOTSTRAP_TOKEN secret, and refuses while a Super Admin exists', async () => {
+    const saved = process.env.BOOTSTRAP_TOKEN;
+    try {
+      delete process.env.BOOTSTRAP_TOKEN;
+      expect((await request(app).post('/api/v1/auth/bootstrap').set('X-Bootstrap-Token', 'x'.repeat(40)).send(body)).status).toBe(404);
+      process.env.BOOTSTRAP_TOKEN = 'short-token';
+      expect((await request(app).post('/api/v1/auth/bootstrap').set('X-Bootstrap-Token', 'short-token').send(body)).status).toBe(404); // too short = disabled
+      process.env.BOOTSTRAP_TOKEN = 'T'.repeat(48);
+      expect((await request(app).post('/api/v1/auth/bootstrap').set('X-Bootstrap-Token', 'W'.repeat(48)).send(body)).status).toBe(404);
+      const r = await request(app).post('/api/v1/auth/bootstrap').set('X-Bootstrap-Token', 'T'.repeat(48)).send(body);
+      expect(r.status).toBe(409);
+      expect(r.body.error.code).toBe('BOOTSTRAP_REFUSED');
+      expect(await prisma.user.count({ where: { username: 'lateadmin' } })).toBe(0);
+    } finally {
+      if (saved === undefined) delete process.env.BOOTSTRAP_TOKEN;
+      else process.env.BOOTSTRAP_TOKEN = saved;
+    }
+  });
+});
+
+describe('F1: missing secrets in staging/production fail closed without crashing start-up', () => {
+  it('config loads with empty secrets and the start-up check reports them (Worker answers 503)', async () => {
+    const saved = { ...process.env };
+    try {
+      process.env.APP_ENV = 'production';
+      delete process.env.JWT_SECRET;
+      delete process.env.APP_ENCRYPTION_KEY;
+      vi.resetModules();
+      const fresh = await import('../src/config');
+      expect(fresh.config.jwtSecret).toBe(''); // no insecure fallback
+      expect(fresh.config.encryptionKey).toBe('');
+      const problems = fresh.productionConfigProblems(process.env, 'production').join(' ');
+      expect(problems).toMatch(/JWT_SECRET/);
+      expect(problems).toMatch(/APP_ENCRYPTION_KEY/);
+    } finally {
+      process.env = saved;
+      vi.resetModules();
+    }
   });
 });

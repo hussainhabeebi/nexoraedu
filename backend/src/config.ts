@@ -1,5 +1,3 @@
-import 'dotenv/config';
-
 const env = (k: string, d?: string) => {
   const v = process.env[k] ?? d;
   if (v === undefined) throw new Error(`Missing env ${k}`);
@@ -23,23 +21,26 @@ export const config = {
   isProd,
   appEnv,
   port: Number(env('PORT', '4000')),
-  databaseUrl: env('DATABASE_URL'),
   publicAppUrl: env('PUBLIC_APP_URL', 'http://localhost:5173'),
   apiBaseUrl: env('API_BASE_URL', 'http://localhost:4000'),
   corsOrigins: env('CORS_ORIGINS', 'http://localhost:5173').split(',').map((s) => s.trim()),
-  jwtSecret: env('JWT_SECRET', isHardened || isProd ? undefined : 'dev-insecure-jwt-secret-change-me'),
+  // Staging/production: no fallback. A missing secret is '' here and is reported by productionConfigProblems(),
+  // so the Worker answers 503 (and runs no jobs) instead of crashing at start-up, which would also block the very
+  // first deploy of a new Worker before its secrets can be added (deployment audit F1).
+  jwtSecret: env('JWT_SECRET', isHardened || isProd ? '' : 'dev-insecure-jwt-secret-change-me'),
   /** Access token lifetime (seconds). Sessions are also checked server-side on every request. */
   accessTtlSec: Number(env('ACCESS_TOKEN_TTL_SEC', '600')),
   /** Absolute session lifetime (hours) regardless of activity. */
   sessionMaxHours: Number(env('SESSION_MAX_HOURS', '12')),
   /** 32-byte key (hex or base64) used to encrypt integration credentials and MFA secrets at rest (INT-01). */
-  encryptionKey: env('APP_ENCRYPTION_KEY', isHardened || isProd ? undefined : '0'.repeat(64)),
+  encryptionKey: env('APP_ENCRYPTION_KEY', isHardened || isProd ? '' : '0'.repeat(64)),
   uploadDir: env('UPLOAD_DIR', './uploads'),
   maxUploadMb: Number(env('MAX_UPLOAD_MB', '5')),
-  /** Shared secret set on the Cloudflare Worker proxy; when it matches, X-Client-IP is the real client IP. */
-  proxySecret: process.env.PROXY_SECRET || '',
-  /** In staging/production, reject API requests that did not come through the Worker proxy (default on). */
-  requireProxySecret: (process.env.REQUIRE_PROXY_SECRET ?? (isHardened ? 'true' : 'false')) === 'true',
+  /**
+   * Client IP source. On Cloudflare Workers the edge sets CF-Connecting-IP (clients cannot override it), so it
+   * is trusted there; in local Node.js tests it is trusted only when a test turns this on.
+   */
+  trustCfConnectingIp: typeof navigator !== 'undefined' && navigator.userAgent === 'Cloudflare-Workers',
   /** Express "trust proxy". Off by default: client IP comes only from the authenticated proxy header. */
   trustProxy: process.env.TRUST_PROXY === undefined ? false : Number(process.env.TRUST_PROXY),
   enableApiDocs: (process.env.ENABLE_API_DOCS ?? (isHardened ? 'false' : 'true')) === 'true',
@@ -80,8 +81,6 @@ export function productionConfigProblems(e: NodeJS.ProcessEnv, target: AppEnv): 
   }
   const cors = (e.CORS_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   if (!cors.length || cors.some((o) => !o.startsWith('https://') || /localhost|127\.0\.0\.1/.test(o))) p.push('CORS_ORIGINS must list only https:// origins (no localhost).');
-  const requireProxy = (e.REQUIRE_PROXY_SECRET ?? 'true') === 'true';
-  if (requireProxy && Buffer.byteLength(e.PROXY_SECRET ?? '', 'utf8') < 24) p.push('PROXY_SECRET must be set (at least 24 random bytes) when REQUIRE_PROXY_SECRET is on.');
   if (e.SEED_ADMIN_PASSWORD) p.push('SEED_ADMIN_PASSWORD is no longer supported; remove it and use `npm run admin:bootstrap`.');
   return p;
 }

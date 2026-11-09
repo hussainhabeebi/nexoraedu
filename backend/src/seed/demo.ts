@@ -6,15 +6,15 @@
  *
  *   APP_ENV=development npm run db:seed:demo
  */
-import { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '#prisma';
+import { withLocalDb } from '../cli/local-db';
 import { DEFAULT_ROLES } from '../lib/permissions';
 import { hashPassword, passwordProblems } from '../lib/password';
 import { randomPassword } from '../lib/util';
 import { seedReference } from './reference';
 
-export const DEMO_USERNAMES = ['director', 'office', 'salesmgr', 'counselor1', 'counselor2', 'finmgr', 'accounts', 'acadmgr', 'faculty1', 'faculty2', 'examofficer'];
-/** Accounts created by the pre-hardening seed (including the old default "admin"). */
-export const LEGACY_DEFAULT_USERNAMES = ['admin', ...DEMO_USERNAMES];
+export { DEMO_USERNAMES, LEGACY_DEFAULT_USERNAMES } from './demo-accounts';
+import { DEMO_USERNAMES } from './demo-accounts';
 
 export function assertDemoAllowed(e: NodeJS.ProcessEnv = process.env) {
   const appEnv = e.APP_ENV ?? (e.NODE_ENV === 'test' ? 'test' : undefined);
@@ -109,8 +109,7 @@ export async function seedDemo(prisma: PrismaClient, e: NodeJS.ProcessEnv = proc
 }
 
 if (require.main === module) {
-  const prisma = new PrismaClient();
-  seedDemo(prisma)
+  withLocalDb((prisma) => seedDemo(prisma)
     .then((issued) => {
       console.log('Demo data seeded. Privileged demo users must enrol MFA at first sign-in.');
       if (issued.length) {
@@ -122,5 +121,5 @@ if (require.main === module) {
       console.error(e.message ?? e);
       process.exitCode = 1;
     })
-    .finally(() => prisma.$disconnect());
+  );
 }

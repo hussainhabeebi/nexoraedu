@@ -14,22 +14,14 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env: { POSTGRES_USER: nexora, POSTGRES_PASSWORD: nexora, POSTGRES_DB: nexora_test }
-        ports: ["5432:5432"]
-        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
-    env:
-      # Disposable CI database. Tests run as a restricted role created by test/global-setup.ts (prisma/sql/app-role.sql).
-      TEST_DATABASE_URL: postgresql://nexora:nexora@localhost:5432/nexora_test?schema=public
+    # Tests run against a real local Cloudflare D1 + R2 (Wrangler's local runtime, no Cloudflare account or network).
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - name: Backend — typecheck, tests (incl. security regression + RBAC matrix) and coverage
         working-directory: backend
-        run: npm ci && npx prisma generate && npx tsc --noEmit && npx vitest run --coverage --coverage.include='src/lib/**' --coverage.include='src/services/**' --coverage.reporter=text-summary
+        run: npm ci && npx tsc --noEmit && npx vitest run --coverage --coverage.include='src/lib/**' --coverage.include='src/services/**' --coverage.reporter=text-summary
       - name: Frontend — typecheck & build
         working-directory: frontend
         run: npm ci && npx tsc -b && npx vite build

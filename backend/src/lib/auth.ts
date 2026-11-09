@@ -7,13 +7,14 @@
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import type { NextFunction, Request, Response } from 'express';
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '#prisma';
 import { config } from '../config';
 import { HttpError, forbidden } from './http';
 import { hasPerm, MFA_REQUIRED_ROLES } from './permissions';
 import { prisma } from './prisma';
 import { getSettings } from './settings';
 import { randomToken, sha256 } from './util';
+import { type Tx } from './db';
 
 export interface AuthUser {
   id: string;
@@ -39,7 +40,7 @@ declare global {
   }
 }
 
-type Db = Prisma.TransactionClient | typeof prisma;
+type Db = Tx | typeof prisma;
 
 export const REFRESH_COOKIE = '__Host-nx_rt';
 export const requiresMfa = (roles: string[]) => roles.some((r) => (MFA_REQUIRED_ROLES as readonly string[]).includes(r));
@@ -58,8 +59,8 @@ export async function loadAuthUser(userId: string, authVersion?: number): Promis
   const u = await prisma.user.findUnique({ where: { id: userId }, include: { roles: { include: { role: true } }, student: true } });
   if (!u || !u.isActive) return null;
   if (authVersion !== undefined && u.authVersion !== authVersion) return null;
-  const perms = new Set<string>(u.extraPermissions);
-  u.roles.forEach((r) => r.role.permissions.forEach((p) => perms.add(p)));
+  const perms = new Set<string>((u.extraPermissions as string[] | null) ?? []);
+  u.roles.forEach((r) => ((r.role.permissions as string[] | null) ?? []).forEach((p) => perms.add(p)));
   const roles = u.roles.map((r) => r.role.key);
   const v = { id: u.id, name: u.name, email: u.email, roles, perms: [...perms], studentId: u.student?.id, mfaRequired: requiresMfa(roles), mustChangePassword: u.mustChangePassword };
   if (authVersion !== undefined) {

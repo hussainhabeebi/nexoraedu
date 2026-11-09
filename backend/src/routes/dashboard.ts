@@ -1,6 +1,6 @@
 /** Role-specific dashboards (SRS §16) and report catalogue (SRS §15). */
 import { Router } from 'express';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '#prisma';
 import { prisma } from '../lib/prisma';
 import { audit } from '../lib/audit';
 import { batchScopeIds } from '../lib/policy';
@@ -9,6 +9,7 @@ import { can, userCan } from '../lib/auth';
 import { getSettings } from '../lib/settings';
 import { money, toCsv } from '../lib/util';
 import { canActOn } from '../services/approvals';
+import { dbDate } from '../lib/db';
 
 const r = Router();
 const startOfDay = (d = new Date()) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -25,9 +26,9 @@ async function totalOutstanding() {
 async function monthlyTrend(months = 6) {
   const from = new Date(new Date().getFullYear(), new Date().getMonth() - (months - 1), 1);
   const [adm, rev, leads] = await Promise.all([
-    prisma.$queryRaw<{ m: Date; c: bigint }[]>`SELECT date_trunc('month', "admissionDate") m, COUNT(*) c FROM students WHERE "admissionDate" >= ${from} GROUP BY 1`,
-    prisma.$queryRaw<{ m: Date; s: number }[]>`SELECT date_trunc('month', "paidAt") m, SUM(amount)::float s FROM payments WHERE status <> 'CANCELLED' AND "paidAt" >= ${from} GROUP BY 1`,
-    prisma.$queryRaw<{ m: Date; c: bigint }[]>`SELECT date_trunc('month', "createdAt") m, COUNT(*) c FROM leads WHERE "createdAt" >= ${from} GROUP BY 1`,
+    prisma.$queryRaw<{ m: Date; c: bigint }[]>`SELECT (substr("admissionDate", 1, 7) || '-01') m, COUNT(*) c FROM students WHERE "admissionDate" >= ${dbDate(from)} GROUP BY 1`,
+    prisma.$queryRaw<{ m: Date; s: number }[]>`SELECT (substr("paidAt", 1, 7) || '-01') m, SUM(amount) s FROM payments WHERE status <> 'CANCELLED' AND "paidAt" >= ${dbDate(from)} GROUP BY 1`,
+    prisma.$queryRaw<{ m: Date; c: bigint }[]>`SELECT (substr("createdAt", 1, 7) || '-01') m, COUNT(*) c FROM leads WHERE "createdAt" >= ${dbDate(from)} GROUP BY 1`,
   ]);
   const key = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
   return Array.from({ length: months }, (_, i) => {
@@ -109,7 +110,7 @@ r.get('/', ah(async (req, res) => {
         SELECT u.id, u.name,
           (SELECT COUNT(*) FROM leads l WHERE l."ownerId" = u.id) leads,
           (SELECT COUNT(*) FROM leads l WHERE l."ownerId" = u.id AND l.status = 'ADMITTED') admitted,
-          (SELECT COUNT(*) FROM lead_activities a WHERE a."userId" = u.id AND a."createdAt" > now() - interval '30 days') activities
+          (SELECT COUNT(*) FROM lead_activities a WHERE a."userId" = u.id AND a."createdAt" > ${dbDate(Date.now() - 30 * 864e5)}) activities
         FROM users u JOIN user_roles ur ON ur."userId" = u.id JOIN roles r ON r.id = ur."roleId"
         WHERE r.key = 'counselor' AND u."isActive" ORDER BY admitted DESC, leads DESC`;
       sales.leaderboard = board.map((b) => ({ ...b, leads: Number(b.leads), admitted: Number(b.admitted), activities: Number(b.activities), conversion: Number(b.leads) ? Math.round((Number(b.admitted) / Number(b.leads)) * 1000) / 10 : 0 }));
@@ -146,17 +147,19 @@ r.get('/', ah(async (req, res) => {
       prisma.batch.findMany({ where: { status: 'RUNNING' }, select: { id: true, code: true } }),
     ]);
     const byBatch = await prisma.$queryRaw<{ code: string; pct: number }[]>`
-      SELECT b.code, ROUND(100.0 * SUM(CASE WHEN a.status IN ('PRESENT','LATE') THEN 1 ELSE 0 END) / NULLIF(COUNT(a.id),0), 1)::float pct
+      SELECT b.code, ROUND(100.0 * SUM(CASE WHEN a.status IN ('PRESENT','LATE') THEN 1 ELSE 0 END) / NULLIF(COUNT(a.id),0), 1) pct
       FROM batches b JOIN timetable_sessions t ON t."batchId" = b.id JOIN attendance a ON a."sessionId" = t.id
       WHERE b.status = 'RUNNING' GROUP BY b.code ORDER BY b.code`;
     const low = await prisma.$queryRaw<{ id: string; name: string; code: string; pct: number }[]>`
-      SELECT s.id, s."fullName" name, s."studentCode" code, ROUND(100.0 * SUM(CASE WHEN a.status IN ('PRESENT','LATE') THEN 1 ELSE 0 END) / COUNT(a.id), 1)::float pct
+      SELECT s.id, s."fullName" name, s."studentCode" code, ROUND(100.0 * SUM(CASE WHEN a.status IN ('PRESENT','LATE') THEN 1 ELSE 0 END) / COUNT(a.id), 1) pct
       FROM students s JOIN attendance a ON a."studentId" = s.id WHERE s.status IN ('ACTIVE','ADMITTED')
       GROUP BY s.id HAVING COUNT(a.id) >= 3 AND 100.0 * SUM(CASE WHEN a.status IN ('PRESENT','LATE') THEN 1 ELSE 0 END) / COUNT(a.id) < ${s.academics.attendanceThreshold}
       ORDER BY pct ASC LIMIT 10`;
+    // Monday 00:00 UTC of the current week (was date_trunc('week', now()) in PostgreSQL).
+    const weekStart = new Date(); weekStart.setUTCHours(0, 0, 0, 0); weekStart.setUTCDate(weekStart.getUTCDate() - ((weekStart.getUTCDay() + 6) % 7));
     const workload = await prisma.$queryRaw<{ name: string; sessions: bigint }[]>`
       SELECT u.name, COUNT(t.id) sessions FROM timetable_sessions t JOIN users u ON u.id = t."facultyId"
-      WHERE t."startsAt" >= date_trunc('week', now()) AND t."startsAt" < date_trunc('week', now()) + interval '7 days' AND NOT t.cancelled GROUP BY u.name ORDER BY 2 DESC`;
+      WHERE t."startsAt" >= ${dbDate(weekStart)} AND t."startsAt" < ${dbDate(weekStart.getTime() + 7 * 864e5)} AND NOT t.cancelled GROUP BY u.name ORDER BY 2 DESC`;
     out.academic = { kpis: { runningBatches: running, todaySessions, batches: batches.length }, attendanceByBatch: byBatch, lowAttendance: low, facultyWorkload: workload.map((w) => ({ name: w.name, sessions: Number(w.sessions) })) };
   }
 
@@ -188,7 +191,7 @@ r.get('/', ah(async (req, res) => {
 // ── Reports (FR-RPT-01/02) ──
 /** batchIds: null = unrestricted; otherwise only these batches (faculty, DSH-09 / RPT-02). */
 type ReportFn = (q: { from: Date; to: Date; batchIds: string[] | null; [k: string]: any }) => Promise<Record<string, unknown>[]>;
-const inBatches = (col: string, ids: string[] | null) => (ids ? Prisma.sql`AND ${Prisma.raw(col)} = ANY(${ids})` : Prisma.empty);
+const inBatches = (col: string, ids: string[] | null) => (ids ? (ids.length ? Prisma.sql`AND ${Prisma.raw(col)} IN (${Prisma.join(ids)})` : Prisma.sql`AND 0`) : Prisma.empty);
 const REPORTS: Record<string, { title: string; perm: string[]; run: ReportFn }> = {
   students: {
     title: 'Student list', perm: ['students:read'],
@@ -203,16 +206,16 @@ const REPORTS: Record<string, { title: string; perm: string[]; run: ReportFn }> 
   admissions: {
     title: 'Admissions by course & source', perm: ['reports:read'],
     run: async ({ from, to }) => prisma.$queryRaw`
-      SELECT c.name "Course", COALESCE(l.source, 'direct') "Source", COUNT(*)::int "Admissions"
+      SELECT c.name "Course", COALESCE(l.source, 'direct') "Source", COUNT(*) "Admissions"
       FROM students s JOIN courses c ON c.id = s."courseId" LEFT JOIN leads l ON l."studentId" = s.id
-      WHERE s."admissionDate" BETWEEN ${from} AND ${to} GROUP BY 1, 2 ORDER BY 3 DESC`,
+      WHERE s."admissionDate" BETWEEN ${dbDate(from)} AND ${dbDate(to)} GROUP BY 1, 2 ORDER BY 3 DESC`,
   },
   leads: {
     title: 'Leads by source / status / owner', perm: ['leads:read_all'],
     run: async ({ from, to }) => prisma.$queryRaw`
-      SELECT l.source "Source", l.status::text "Status", COALESCE(u.name, 'Unassigned') "Owner", COUNT(*)::int "Leads",
-        ROUND(AVG(EXTRACT(EPOCH FROM (now() - l."createdAt")) / 86400))::int "Avg age (days)"
-      FROM leads l LEFT JOIN users u ON u.id = l."ownerId" WHERE l."createdAt" BETWEEN ${from} AND ${to} GROUP BY 1, 2, 3 ORDER BY 4 DESC`,
+      SELECT l.source "Source", l.status "Status", COALESCE(u.name, 'Unassigned') "Owner", COUNT(*) "Leads",
+        CAST(ROUND(AVG(julianday('now') - julianday(l."createdAt"))) AS INTEGER) "Avg age (days)"
+      FROM leads l LEFT JOIN users u ON u.id = l."ownerId" WHERE l."createdAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)} GROUP BY 1, 2, 3 ORDER BY 4 DESC`,
   },
   funnel: {
     title: 'Conversion funnel', perm: ['leads:read_all'],
@@ -228,17 +231,17 @@ const REPORTS: Record<string, { title: string; perm: string[]; run: ReportFn }> 
   },
   'lost-reasons': {
     title: 'Lost-reason analysis', perm: ['leads:read_all'],
-    run: async ({ from, to }) => prisma.$queryRaw`SELECT status::text "Status", COALESCE("closeReason", '—') "Reason", COUNT(*)::int "Leads" FROM leads WHERE status IN ('LOST','JUNK','NOT_INTERESTED') AND "updatedAt" BETWEEN ${from} AND ${to} GROUP BY 1, 2 ORDER BY 3 DESC`,
+    run: async ({ from, to }) => prisma.$queryRaw`SELECT status "Status", COALESCE("closeReason", '—') "Reason", COUNT(*) "Leads" FROM leads WHERE status IN ('LOST','JUNK','NOT_INTERESTED') AND "updatedAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)} GROUP BY 1, 2 ORDER BY 3 DESC`,
   },
   counselors: {
     title: 'Counselor performance', perm: ['leads:read_all'],
     run: async ({ from, to }) => prisma.$queryRaw`
       SELECT u.name "Counselor",
-        (SELECT COUNT(*)::int FROM leads l WHERE l."ownerId" = u.id AND l."createdAt" BETWEEN ${from} AND ${to}) "Leads",
-        (SELECT COUNT(*)::int FROM lead_activities a WHERE a."userId" = u.id AND a.type IN ('CALL','WHATSAPP','EMAIL','SMS','MEETING') AND a."createdAt" BETWEEN ${from} AND ${to}) "Contacts",
-        (SELECT COUNT(*)::int FROM follow_ups f WHERE f."userId" = u.id AND f.status = 'DONE' AND f."dueAt" BETWEEN ${from} AND ${to}) "Follow-ups done",
-        (SELECT COUNT(*)::int FROM follow_ups f WHERE f."userId" = u.id AND f."dueAt" BETWEEN ${from} AND ${to} AND f."dueAt" < now()) "Follow-ups due",
-        (SELECT COUNT(*)::int FROM leads l WHERE l."ownerId" = u.id AND l.status = 'ADMITTED' AND l."updatedAt" BETWEEN ${from} AND ${to}) "Admissions"
+        (SELECT COUNT(*) FROM leads l WHERE l."ownerId" = u.id AND l."createdAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)}) "Leads",
+        (SELECT COUNT(*) FROM lead_activities a WHERE a."userId" = u.id AND a.type IN ('CALL','WHATSAPP','EMAIL','SMS','MEETING') AND a."createdAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)}) "Contacts",
+        (SELECT COUNT(*) FROM follow_ups f WHERE f."userId" = u.id AND f.status = 'DONE' AND f."dueAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)}) "Follow-ups done",
+        (SELECT COUNT(*) FROM follow_ups f WHERE f."userId" = u.id AND f."dueAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)} AND f."dueAt" < ${dbDate(new Date())}) "Follow-ups due",
+        (SELECT COUNT(*) FROM leads l WHERE l."ownerId" = u.id AND l.status = 'ADMITTED' AND l."updatedAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)}) "Admissions"
       FROM users u JOIN user_roles ur ON ur."userId" = u.id JOIN roles r ON r.id = ur."roleId" WHERE r.key = 'counselor' ORDER BY 6 DESC`,
   },
   collections: {
@@ -249,30 +252,30 @@ const REPORTS: Record<string, { title: string; perm: string[]; run: ReportFn }> 
   'discounts-refunds': {
     title: 'Discounts, scholarships & refunds', perm: ['finance:read'],
     run: async ({ from, to }) => prisma.$queryRaw`
-      SELECT 'Discount' "Kind", d.kind "Type", s."fullName" "Student", d.amount::float "Amount", d.reason "Reason", d.status "Status", d."createdAt"::date "Date" FROM discounts d JOIN students s ON s.id = d."studentId" WHERE d."createdAt" BETWEEN ${from} AND ${to}
+      SELECT 'Discount' "Kind", d.kind "Type", s."fullName" "Student", d.amount "Amount", d.reason "Reason", d.status "Status", substr(d."createdAt", 1, 10) "Date" FROM discounts d JOIN students s ON s.id = d."studentId" WHERE d."createdAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)}
       UNION ALL
-      SELECT 'Refund', '-', s."fullName", r.amount::float, r.reason, r.status, r."createdAt"::date FROM refunds r JOIN students s ON s.id = r."studentId" WHERE r."createdAt" BETWEEN ${from} AND ${to} ORDER BY 7`,
+      SELECT 'Refund', '-', s."fullName", r.amount, r.reason, r.status, substr(r."createdAt", 1, 10) FROM refunds r JOIN students s ON s.id = r."studentId" WHERE r."createdAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)} ORDER BY 7`,
   },
   ledger: {
     title: 'Financial ledger', perm: ['finance:read'],
     run: async ({ from, to }) => prisma.$queryRaw`
-      SELECT e."createdAt"::date "Date", s."studentCode" "ID", s."fullName" "Student", e.type "Type", e.narration "Narration", e.debit::float "Debit", e.credit::float "Credit"
-      FROM ledger_entries e JOIN students s ON s.id = e."studentId" WHERE e."createdAt" BETWEEN ${from} AND ${to} ORDER BY e."createdAt"`,
+      SELECT substr(e."createdAt", 1, 10) "Date", s."studentCode" "ID", s."fullName" "Student", e.type "Type", e.narration "Narration", e.debit "Debit", e.credit "Credit"
+      FROM ledger_entries e JOIN students s ON s.id = e."studentId" WHERE e."createdAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)} ORDER BY e."createdAt"`,
   },
   attendance: {
     title: 'Attendance by student', perm: ['academics:read'],
     run: async ({ from, to, batchIds }) => prisma.$queryRaw`
-      SELECT b.code "Batch", s."studentCode" "ID", s."fullName" "Student", COUNT(a.id)::int "Sessions",
-        SUM(CASE WHEN a.status IN ('PRESENT','LATE') THEN 1 ELSE 0 END)::int "Attended",
-        ROUND(100.0 * SUM(CASE WHEN a.status IN ('PRESENT','LATE') THEN 1 ELSE 0 END) / NULLIF(COUNT(a.id), 0), 1)::float "%"
+      SELECT b.code "Batch", s."studentCode" "ID", s."fullName" "Student", COUNT(a.id) "Sessions",
+        SUM(CASE WHEN a.status IN ('PRESENT','LATE') THEN 1 ELSE 0 END) "Attended",
+        ROUND(100.0 * SUM(CASE WHEN a.status IN ('PRESENT','LATE') THEN 1 ELSE 0 END) / NULLIF(COUNT(a.id), 0), 1) "%"
       FROM attendance a JOIN students s ON s.id = a."studentId" JOIN timetable_sessions t ON t.id = a."sessionId" JOIN batches b ON b.id = t."batchId"
-      WHERE t."startsAt" BETWEEN ${from} AND ${to} ${inBatches('b.id', batchIds)} GROUP BY 1, 2, 3 ORDER BY 1, 6`,
+      WHERE t."startsAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)} ${inBatches('b.id', batchIds)} GROUP BY 1, 2, 3 ORDER BY 1, 6`,
   },
   'exam-results': {
     title: 'Examination results', perm: ['exams:read'],
     run: async ({ from, to, batchIds }) => prisma.$queryRaw`
       SELECT e.title "Exam", e.type "Type", s."studentCode" "ID", s."fullName" "Student", r.marks "Marks", e."totalMarks" "Total", r.percentage "%", r.grade "Grade", CASE WHEN r.passed THEN 'Pass' ELSE 'Fail' END "Result", CASE WHEN e."resultsPublished" THEN 'Yes' ELSE 'No' END "Published"
-      FROM results r JOIN exams e ON e.id = r."examId" JOIN students s ON s.id = r."studentId" WHERE e."startAt" BETWEEN ${from} AND ${to} ${inBatches('e."batchId"', batchIds)} ORDER BY 1, 5 DESC`,
+      FROM results r JOIN exams e ON e.id = r."examId" JOIN students s ON s.id = r."studentId" WHERE e."startAt" BETWEEN ${dbDate(from)} AND ${dbDate(to)} ${inBatches('e."batchId"', batchIds)} ORDER BY 1, 5 DESC`,
   },
 };
 
