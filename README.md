@@ -118,6 +118,9 @@ Workers Builds settings (Dashboard → Workers → the Worker → Settings → B
 | Build command | `npm run build` | `npm run build` |
 | Deploy command | `npx wrangler d1 migrations apply DB --remote && npx wrangler deploy` | `npx wrangler d1 migrations apply DB --remote --env staging && npx wrangler deploy --env staging` |
 
+Staging: https://nexoraedu-staging.nexoraacademy.workers.dev, built from the `cloudflare-backend` branch
+(D1 `nexora-erp-staging`, R2 `nexora-files-staging`). Synthetic data only.
+
 Secrets (Worker → Settings → Variables and Secrets; different values for staging and production, 32+ random bytes):
 `JWT_SECRET`, `APP_ENCRYPTION_KEY` (64 hex chars), `BOOTSTRAP_TOKEN` (only until the first Super Administrator
 exists), and later `CHATWOOT_*` / `SMTP_*`. The Worker answers 503 instead of serving while a required secret is
