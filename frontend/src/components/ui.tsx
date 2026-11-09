@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type InputHTMLAttributes, type Reac
 import clsx from 'clsx';
 import { AlertTriangle, Inbox, Loader2, X } from 'lucide-react';
 import { initials, label } from '@/lib/format';
+import { api } from '@/lib/api';
 
 export const cx = clsx;
 
@@ -78,9 +79,26 @@ export function Badge({ status, children, className }: { status?: string; childr
   return <span className={cx('chip ring-1 ring-inset', STATUS_TONE[status ?? ''] ?? 'bg-slate-100 text-slate-700 ring-slate-200', className)}>{children ?? label(status)}</span>;
 }
 
+/** Protected images (student photos) need the bearer token, so they are fetched and shown as blob URLs. */
+function useProtectedImage(src?: string | null) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!src || !src.startsWith('/api/v1/')) return setUrl(src ?? null);
+    let alive = true;
+    let obj: string | null = null;
+    api(src.replace(/^\/api\/v1/, ''), { raw: true })
+      .then((r: Response) => r.blob())
+      .then((b) => { if (alive) { obj = URL.createObjectURL(b); setUrl(obj); } })
+      .catch(() => alive && setUrl(null));
+    return () => { alive = false; if (obj) URL.revokeObjectURL(obj); };
+  }, [src]);
+  return url;
+}
+
 export function Avatar({ name, src, size = 'md' }: { name: string; src?: string | null; size?: 'sm' | 'md' | 'lg' }) {
   const s = { sm: 'h-8 w-8 text-xs', md: 'h-10 w-10 text-sm', lg: 'h-16 w-16 text-lg' }[size];
-  if (src) return <img src={src} alt="" className={cx('rounded-full object-cover', s)} />;
+  const url = useProtectedImage(src);
+  if (url) return <img src={url} alt="" className={cx('rounded-full object-cover', s)} />;
   return <div className={cx('flex shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand-500 to-accent-500 font-semibold text-white', s)}>{initials(name)}</div>;
 }
 

@@ -10,9 +10,11 @@ export const DEFAULT_SETTINGS = {
     address: 'Nexora Academy, Kerala, India',
     logoUrl: '',
     currency: 'INR',
+    /** IANA time zone for business dates (due dates, overdue days, reminders, receipts). Decision P6 pending. */
+    timeZone: 'Asia/Kolkata',
   },
   ids: { student: 'NXA-{YYYY}-#####', lead: 'LD-{YY}{MM}-#####', application: 'APP-{YYYY}-#####', invoice: 'INV-{YYYY}-######', receipt: 'RCP-{YYYY}-######', certificate: 'NXC-{YYYY}-#####' },
-  security: { sessionTimeoutMin: 30, passwordMinLength: 8, maxFailedLogins: 5, lockMinutes: 15 },
+  security: { sessionTimeoutMin: 30, passwordMinLength: 10, maxFailedLogins: 5, lockMinutes: 15, activationHours: 72 },
   crm: { autoAssign: 'round_robin', inactivityDays: 3 },
   finance: { discountApprovalLimit: 5000, reminderDaysBefore: [3, 1], reminderDaysAfter: [1, 7], monthlyTarget: 1000000 },
   academics: { attendanceThreshold: 75, attendanceEditWindowHours: 24 },

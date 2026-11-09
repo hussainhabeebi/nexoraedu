@@ -1,10 +1,19 @@
 /** OpenAPI 3 description of the v1 API (API-10). Paths are listed per module; request bodies are validated server-side with zod. */
 const E: [string, string, string, string][] = [
   // [method, path, tag, summary]
-  ['post', '/auth/login', 'Auth', 'Sign in (staff or student) → access + refresh token'],
-  ['post', '/auth/refresh', 'Auth', 'Rotate refresh token'],
-  ['post', '/auth/logout', 'Auth', 'Revoke refresh token'],
+  ['post', '/auth/login', 'Auth', 'Password step → access token + HttpOnly refresh cookie, or { mfaRequired, mfaToken }'],
+  ['post', '/auth/mfa/verify', 'Auth', 'Second factor (TOTP code or recovery code) → session'],
+  ['post', '/auth/mfa/enroll/start', 'Auth', 'Begin authenticator enrolment (mandatory for privileged roles)'],
+  ['post', '/auth/mfa/enroll/confirm', 'Auth', 'Confirm enrolment → one-time recovery codes'],
+  ['post', '/auth/refresh', 'Auth', 'Rotate the refresh cookie (header X-Requested-With: nexora); reuse revokes the session family'],
+  ['post', '/auth/logout', 'Auth', 'End the session (cookie)'],
+  ['get', '/auth/sessions', 'Auth', 'List my active sessions'],
+  ['delete', '/auth/sessions/{id}', 'Auth', 'End one of my sessions'],
+  ['post', '/auth/sessions/revoke-others', 'Auth', 'End all my other sessions'],
+  ['post', '/admin/users/{id}/mfa/reset', 'Admin', 'Reset a user’s MFA (Super Administrator only)'],
   ['get', '/auth/me', 'Auth', 'Current user, roles & permissions'],
+  ['post', '/auth/bootstrap', 'Auth', 'First Super Administrator (header X-Bootstrap-Token; only while BOOTSTRAP_TOKEN is set) → single-use activation link'],
+  ['post', '/auth/bootstrap/reissue-activation', 'Auth', 'Staging only: fresh activation link for the never-activated bootstrapped Super Admin (X-Bootstrap-Token + username + email)'],
   ['post', '/auth/change-password', 'Auth', 'Change password'],
   ['post', '/auth/forgot-password', 'Auth', 'Send reset link (email / WhatsApp)'],
   ['post', '/auth/reset-password', 'Auth', 'Reset password with token'],
@@ -114,7 +123,7 @@ const E: [string, string, string, string][] = [
 const paths: Record<string, any> = {};
 for (const [m, p, tag, summary] of E) {
   paths[p] ??= {};
-  const isPublic = p.startsWith('/public') || p.startsWith('/webhooks') || ['/auth/login', '/auth/refresh', '/auth/forgot-password', '/auth/reset-password'].includes(p);
+  const isPublic = p.startsWith('/public') || p.startsWith('/webhooks') || ['/auth/login', '/auth/mfa/verify', '/auth/refresh', '/auth/logout', '/auth/forgot-password', '/auth/reset-password'].includes(p);
   paths[p][m] = {
     tags: [tag], summary,
     ...(isPublic ? { security: [] } : {}),

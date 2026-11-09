@@ -8,9 +8,9 @@ WhatsApp messaging runs through **Chatwoot** (`app.aiingo.com`), using your What
 
 | Part | Stack |
 |---|---|
-| `backend/` | Node 22, Express, TypeScript, Prisma, PostgreSQL 16, zod, JWT, PDFKit |
+| `backend/` | TypeScript, Express 5 on **Cloudflare Workers** (Node.js compatibility), Prisma 7 on **Cloudflare D1**, zod, JWT, PDFKit |
 | `frontend/` | React 18, Vite, TypeScript, Tailwind CSS, TanStack Query, Recharts |
-| Deploy | Docker Compose (Postgres, API, nginx serving the SPA and proxying `/api`) |
+| Hosting | One Cloudflare Worker serves the React app (static assets) and the API; files in private **R2**; jobs on **Cron Triggers**; deployed by **Workers Builds** from GitHub |
 
 ---
 
@@ -66,31 +66,29 @@ You can also provide these values as environment variables (`CHATWOOT_*` in `bac
 ---
 
 ## Running locally
-
-Requirements: Node 22+ and PostgreSQL 16.
-
+Everything runs on this computer with Cloudflare's local runtime (local D1 database and R2 bucket in `.wrangler/`);
+no Cloudflare account is used.
 ```bash
-# 1. Database
-createuser -P nexora && createdb -O nexora nexora      # password: nexora
-
-# 2. API
-cd backend
-cp .env.example .env                                   # adjust DATABASE_URL etc.
-npm install
-npx prisma migrate deploy                              # schema + immutability triggers
-npm run db:seed                                        # roles, masters, courses, templates, workflows, demo data
-npm run dev                                            # http://localhost:4000  (Swagger: /api/docs)
-
-# 3. Web
-cd ../frontend
-npm install
-npm run dev                                            # http://localhost:5173  (proxies /api to :4000)
+npm install && npm --prefix frontend install && npm --prefix backend install
+cp .dev.vars.example .dev.vars                         # local-only settings (never real secrets)
+npm run dev                                            # builds the app, applies migrations locally, http://localhost:8787
+npm --prefix backend run db:seed:demo                  # optional synthetic demo data (refused in production)
+npm --prefix backend run admin:bootstrap:dev -- --email you@example.com --name "Your Name" --username you
+npm run dev:web                                        # optional: Vite hot reload on :5173 (proxies /api to :8787)
 ```
 
-### Demo accounts (password `Admin@12345`; set `SEED_ADMIN_PASSWORD` / `SEED_DEMO=false` in production)
+### Accounts
+No account or password is ever seeded. The first Super Administrator gets a single-use 60-minute activation link
+(locally: `admin:bootstrap:dev`; on Cloudflare: `POST /api/v1/auth/bootstrap` while the `BOOTSTRAP_TOKEN` secret is set,
+see below). Staging only: if that first link is lost or expires before the account is activated,
+`POST /api/v1/auth/bootstrap/reissue-activation` (same token, plus the account's `username` and `email`) issues a fresh
+one and invalidates the old one; it never creates a user and is refused once the account has been activated. The owner sets a policy-compliant password and must then enrol an authenticator app. A second named
+Super Administrator (`--second` with a management nomination) is needed because privileged role grants require
+approval by another Super Administrator. Privileged roles (Super Admin, Administrator, Management, Finance) must use MFA.
+
+Demo data (refused in production) creates synthetic users with `@example.invalid` emails:
 | Username | Role |
 |---|---|
-| `admin` | Super Administrator |
 | `director` | Management |
 | `office` | Administrator |
 | `salesmgr` | Sales Manager |
@@ -100,87 +98,51 @@ npm run dev                                            # http://localhost:5173  
 | `faculty1`, `faculty2` | Faculty |
 | `examofficer` | Examination Officer |
 
-Students get their login (Student ID, e.g. `nxa-2026-00001`, plus a temporary password) on WhatsApp/email when they are admitted. They must change the password at first sign-in.
+Students get their login (Student ID plus a single-use activation link) on WhatsApp/email when they are admitted.
 
 ### Tests
 ```bash
-cd backend && npm test      # uses TEST_DATABASE_URL (default: postgres nexora_test); resets it each run
+npm test        # 340+ tests against a real local D1 + R2 (Cloudflare's runtime), recreated on each run
 ```
-The end-to-end suite covers: auth and RBAC, duplicate detection, lost-reason enforcement, online application with a document upload (and the under-18 guardian rule), the admission approval chain (including no self-approval), fee plan maths, idempotent payments, overpayment blocking, ledger immutability, payment cancellation with reversal, the online exam (answers hidden, auto-grading, attempt limit, unpublished results hidden), role-specific dashboards, the append-only audit log, and the inbound Chatwoot webhook creating a lead.
 
 ---
 
-## Deploying on Cloudflare (nexoraed.com)
+## Deploying on Cloudflare
+Architecture: **Workers** (site + API) · **D1** (database) · **R2** (private documents) · **Cron Triggers** ·
+**Workers Secrets** · **WAF / rate limiting / Turnstile / Access** · **Workers Builds** (GitHub). Staging and
+production are separate Workers with separate databases, buckets and secrets (`wrangler.jsonc`, `env.staging`).
+Nobody runs Wrangler by hand: Workers Builds applies the database migrations and deploys on every push.
 
-```
-Browser ──▶ Cloudflare Worker "nexoraedu"  (static site + portals, wrangler.jsonc)
-               └─ /api/*, /health ──▶ Cloudflare Tunnel (api.nexoraed.com)
-                                        └─ server: docker compose → API + PostgreSQL + nightly backup
-Chatwoot (app.aiingo.com) webhooks ──▶ https://nexoraed.com/api/v1/webhooks/chatwoot
-```
+Workers Builds settings (Dashboard → Workers → the Worker → Settings → Build):
+| | Production `nexoraedu` | Staging `nexoraedu-staging` |
+|---|---|---|
+| Branch | `main` (non-production branch builds **off**) | the staging branch |
+| Build command | `npm run build` | `npm run build` |
+| Deploy command | `npx wrangler d1 migrations apply DB --remote && npx wrangler deploy` | `npx wrangler d1 migrations apply DB --remote --env staging && npx wrangler deploy --env staging` |
 
-**1. Worker (Cloudflare dashboard → Workers & Pages → Create → Import a repository → `hussainhabeebi/nexoraedu`)**
+Staging: https://nexoraedu-staging.nexoraacademy.workers.dev, built from the `cloudflare-backend` branch
+(D1 `nexora-erp-staging`, R2 `nexora-files-staging`). Synthetic data only.
 
-| Setting | Value |
-|---|---|
-| Project name | `nexoraedu` |
-| Build command | `npm run build` |
-| Deploy command | `npx wrangler deploy` |
-| Non-production branch deploy command | `npx wrangler versions upload` |
-| Production branch | `main` |
-| Root directory | `/` (leave empty) |
-| Build variable | `NODE_VERSION` = `22` |
+Secrets (Worker → Settings → Variables and Secrets; different values for staging and production, 32+ random bytes):
+`JWT_SECRET`, `APP_ENCRYPTION_KEY` (64 hex chars), `BOOTSTRAP_TOKEN` (only until the first Super Administrator
+exists), and later `CHATWOOT_*` / `SMTP_*`. The Worker answers 503 instead of serving while a required secret is
+missing or weak.
 
-After the first deploy go to Worker → Settings:
-- **Variables and Secrets:** check that `API_ORIGIN` = `https://api.nexoraed.com` (it comes from `wrangler.jsonc`). Add the secret **`PROXY_SECRET`** with the same value as in `deploy/.env`.
-- **Domains & Routes:** add the custom domains `nexoraed.com` and `www.nexoraed.com`.
-
-**2. Backend server + Cloudflare Tunnel**
-1. Zero Trust → Networks → **Tunnels → Create tunnel** (Cloudflared, Docker) → copy the token. Add a public hostname `api.nexoraed.com` → service `http://api:4000`.
-2. On any Linux server with Docker:
-   ```bash
-   git clone https://github.com/hussainhabeebi/nexoraedu && cd nexoraedu
-   cp deploy/.env.cloudflare.example deploy/.env   # secrets, tunnel token, PROXY_SECRET, Chatwoot
-   docker compose -f deploy/docker-compose.cloudflare.yml --env-file deploy/.env up -d --build
-   ```
-   The API runs migrations and the seed on start. Check it with `https://nexoraed.com/health`.
-   To update: `git pull && docker compose -f deploy/docker-compose.cloudflare.yml --env-file deploy/.env up -d --build`.
-
-**3. Go-live checklist**
-- Sign in as `admin` with `SEED_ADMIN_PASSWORD` and change the password.
-- Settings → General: academy phone, WhatsApp number and address.
-- Settings → WhatsApp: Account ID, inbox ID, token → Test connection. Then add the webhook in Chatwoot.
-- Create staff users. Review courses, fees and batches.
-
-GitHub Actions (`.github/workflows/deploy.yml`) runs the backend tests and the frontend build on every push and pull request.
-
-## Deploying on your own server (alternative)
-
-```bash
-cp backend/.env.example .env
-# set: JWT_SECRET, APP_ENCRYPTION_KEY (openssl rand -hex 32), POSTGRES_PASSWORD,
-#      PUBLIC_APP_URL=https://nexoraed.com, API_BASE_URL=https://nexoraed.com,
-#      CORS_ORIGINS=https://nexoraed.com, CHATWOOT_* (optional), SMTP_* (optional),
-#      SEED_ADMIN_PASSWORD, SEED_DEMO=false
-docker compose up -d --build        # web on :8080 → put behind TLS (Caddy / nginx / Cloudflare)
-```
-- The API container runs `prisma migrate deploy` and the (idempotent) seed on start.
-- Back up the `pgdata` and `uploads` volumes. The SRS targets daily full backups plus PITR (BKP-01); use your managed Postgres or `pg_dump` with WAL archiving.
-- Website / landing-page forms can push leads to `POST /api/v1/webhooks/website-leads` with the header `X-API-Key: $WEBSITE_LEADS_API_KEY`.
-- Payment gateways can confirm payments at `POST /api/v1/webhooks/payment`, signed with `HMAC-SHA256(PAYMENT_WEBHOOK_SECRET, "<timestamp>.<raw body>")` in `X-Signature` and the timestamp in `X-Timestamp`.
-
----
+Migrations: `backend/migrations/*.sql` (generated from the Prisma schema with `npm --prefix backend run db:migrations:generate`;
+later schema changes are new numbered files). Backups: D1 Time Travel (point-in-time restore) plus R2.
 
 ## Security & data integrity (SRS §18, §20, §24)
-- JWT access tokens (15 min) with rotating refresh tokens. Account lock after failed logins. Generic login errors. Idle sign-out after 30 min. Forced password change on first login.
-- RBAC on every API route, plus object-level scoping: counselors see only their own leads, faculty only their batches' students, students only their own records.
-- Rate limiting (global, auth and public forms). Helmet headers. zod validation on every input. Parameterised queries (Prisma). CSV-injection guard on exports.
-- **PostgreSQL triggers make `audit_logs`, `ledger_entries`, `lead_activities` and `student_history` append-only.** Corrections are reversing entries.
+- Server-side sessions: short-lived access tokens held in memory, refresh token only in an HttpOnly/Secure/SameSite=Strict cookie with rotation and reuse detection; server-side idle timeout; users can view and end sessions. Deactivation, role and password changes apply on the next request.
+- MFA (TOTP authenticator + recovery codes), mandatory for Super Admin, Administrator, Management and Finance roles.
+- Password policy: ≥10 characters, 3 character classes, common/personal passwords blocked, last 5 not reusable, bcrypt cost 12. Account lock after failed logins with identical generic errors. Forced password change enforced by the API.
+- RBAC on every API route, plus object-level scoping (`src/lib/policy.ts`): counselors see only their own leads and the students converted from them, faculty only their batches, students only their own records; identity documents only for administrators, the owning counselor and admission reviewers.
+- Only a Super Administrator manages privileged accounts; privileged role grants need a second Super Administrator's approval; nobody changes their own roles. Approvals fail closed and nobody approves their own request.
+- Rate limiting: sign-in, MFA, refresh, password reset and public forms are counted in D1 (shared by every Worker instance); a general per-instance API limit; Cloudflare WAF rules at the edge. Helmet headers. zod validation on every input. Parameterised queries (Prisma). CSV-injection guard on exports.
+- **Every change is one atomic D1 batch** (`backend/src/lib/db.ts`): the business rows and their audit row commit together or not at all; concurrent changes to the same student account, approval or batch are serialised with optimistic locks and retried. Database triggers (`backend/migrations/0002_rules.sql`) make `audit_logs`, `ledger_entries`, `lead_activities`, `student_history`, `login_logs`, `approval_actions` and `integration_logs` append-only, keep enrollment and fee-adjustment history undeletable, keep every amount at 2 decimals and stop an installment from being overpaid. Corrections are reversing entries. Viewing logs and exporting data are themselves audited.
 - Integration credentials are encrypted at rest (AES-256-GCM). Every Chatwoot call is logged in `integration_logs`. Webhooks are verified (token, or HMAC signature plus timestamp).
-- Uploads: type and size limits, random file names, documents served only through authenticated endpoints.
+- Uploads: type, size and content-signature checks, random file names, stored in a private R2 bucket; documents and student photos served only through authenticated, scoped endpoints.
 
 ## Not yet included / next steps
-- **MFA** (FR-AUTH-03, should-have) — next on the security list
 - A **live payment gateway** checkout: the webhook and reconciliation are ready; the provider (Razorpay / PayU) needs to be chosen
 - **SMS gateway** adapter (the notification engine supports adding channels)
 - Scheduled e-mailing of reports, saved filters and dashboard widget re-ordering (should/could items)

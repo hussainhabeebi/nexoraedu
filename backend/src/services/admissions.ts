@@ -1,15 +1,17 @@
 /** Application → Admission → Student conversion without re-entry (CRM-12/13/14, STU-01). */
-import bcrypt from 'bcryptjs';
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '#prisma';
 import { z } from 'zod';
 import { badRequest, conflict } from '../lib/http';
 import { nextNumber } from '../lib/sequence';
 import { getSettings } from '../lib/settings';
-import { normalizeEmail, normalizePhone, randomPassword } from '../lib/util';
+import { normalizeEmail, normalizePhone } from '../lib/util';
+import { UNUSABLE_PASSWORD } from '../lib/password';
+import { issueActivationLink } from '../lib/activation';
 import { createFeePlan } from './finance';
+import { openEnrollment } from './enrollments';
 import { notifyLater } from './notify';
+import { type Tx, type ReadDb } from '../lib/db';
 
-type Tx = Prisma.TransactionClient;
 
 export const guardianSchema = z.object({
   name: z.string().min(2),
@@ -38,7 +40,8 @@ export const applicationDataSchema = z.object({
   guardians: z.array(guardianSchema).default([]),
   education: z.array(educationSchema).default([]),
   preferences: z.object({ courseId: z.string(), batchId: z.string().optional().nullable(), mode: z.string().optional() }),
-  declaration: z.literal(true).optional(),
+  // Staff registration has no declaration checkbox and may send false; the public application route requires true.
+  declaration: z.boolean().optional(),
 });
 export type ApplicationData = z.infer<typeof applicationDataSchema>;
 
@@ -55,7 +58,7 @@ export function validateApplicationData(d: ApplicationData) {
 }
 
 /** STU-03 duplicate detection by phone & email. */
-export async function assertNoDuplicateStudent(tx: Tx, phone: string, email: string, exceptId?: string) {
+export async function assertNoDuplicateStudent(tx: ReadDb, phone: string, email: string, exceptId?: string) {
   const dup = await tx.student.findFirst({
     where: { OR: [{ phoneNormalized: normalizePhone(phone) }, { emailNormalized: normalizeEmail(email)! }], NOT: exceptId ? { id: exceptId } : undefined },
     select: { studentCode: true, fullName: true },
@@ -64,7 +67,10 @@ export async function assertNoDuplicateStudent(tx: Tx, phone: string, email: str
 }
 
 /** STU-09 capacity + course match. */
-export async function assertBatchAvailable(tx: Tx, batchId: string, courseId: string) {
+export async function assertBatchAvailable(tx: ReadDb, batchId: string, courseId: string) {
+  // Lock the batch so parallel admissions/transfers cannot overfill it (STU-09). Inside atomic() a concurrent
+  // admission to the same batch makes one of them retry with the new count; outside (pre-checks) it is advisory.
+  if (typeof (tx as any).lock === 'function') await (tx as any).lock(`batch:${batchId}`);
   const b = await tx.batch.findUnique({ where: { id: batchId }, include: { _count: { select: { students: { where: { status: { in: ['ADMITTED', 'ACTIVE', 'ON_HOLD'] } } } } } } });
   if (!b) throw badRequest('Selected batch does not exist.');
   if (b.courseId !== courseId) throw badRequest('Selected batch does not belong to the chosen course.');
@@ -73,7 +79,7 @@ export async function assertBatchAvailable(tx: Tx, batchId: string, courseId: st
   return b;
 }
 
-export async function admitApplication(tx: Tx, applicationId: string, opts: { batchId?: string | null; installments?: number }, actorId: string) {
+export async function admitApplication(tx: Tx, applicationId: string, opts: { batchId?: string | null; installments?: number; approvalRequestId?: string | null }, actorId: string) {
   const app = await tx.application.findUniqueOrThrow({ where: { id: applicationId }, include: { lead: true } });
   if (app.status === 'ADMITTED') return app.studentId!;
   const data = applicationDataSchema.parse(app.data);
@@ -83,8 +89,7 @@ export async function admitApplication(tx: Tx, applicationId: string, opts: { ba
   if (batchId) await assertBatchAvailable(tx, batchId, app.courseId);
 
   const s = await getSettings();
-  const studentCode = await nextNumber(`student:${new Date().getFullYear()}`, s.ids.student, tx);
-  const tempPassword = randomPassword();
+  const studentCode = await nextNumber('student:{year}', s.ids.student, tx);
   const studentRole = await tx.role.findUniqueOrThrow({ where: { key: 'student' } });
   const emailN = normalizeEmail(p.email)!;
   const existingUser = await tx.user.findUnique({ where: { email: emailN } });
@@ -95,8 +100,9 @@ export async function admitApplication(tx: Tx, applicationId: string, opts: { ba
       username: studentCode.toLowerCase(),
       name: p.fullName,
       phone: p.phone,
-      passwordHash: await bcrypt.hash(tempPassword, 10),
-      mustChangePassword: true,
+      // Decision 8: no temporary password; the student activates the portal account with a single-use link.
+      passwordHash: UNUSABLE_PASSWORD,
+      mustChangePassword: false,
       roles: { create: { roleId: studentRole.id } },
     },
   });
@@ -129,12 +135,19 @@ export async function admitApplication(tx: Tx, applicationId: string, opts: { ba
     await tx.leadActivity.create({ data: { leadId: app.leadId, type: 'STATUS', content: `Admitted as ${studentCode}`, userId: actorId } });
   }
   await tx.studentHistory.create({ data: { studentId: student.id, type: 'STATUS', message: `Admitted to ${student.course.name}${student.batch ? ` (${student.batch.code})` : ''}`, userId: actorId } });
-  await createFeePlan(tx, { studentId: student.id, courseId: app.courseId, installments: opts.installments, startDate: new Date(), userId: actorId });
+  // Enrollment history (20.4): the admission opens the first enrollment, linked to the application and approval.
+  const enrollment = await openEnrollment(tx, {
+    studentId: student.id, courseId: app.courseId, batchId, source: app.source === 'direct' ? 'DIRECT' : 'ADMISSION',
+    applicationId: app.id, approvalRequestId: opts.approvalRequestId ?? null, actorId, capacityChecked: true,
+  });
+  await createFeePlan(tx, { studentId: student.id, courseId: app.courseId, installments: opts.installments, startDate: new Date(), userId: actorId, enrollmentId: enrollment.id });
 
+  const act = await issueActivationLink(tx, user.id);
   notifyLater(
     'admission.confirmed',
     { userId: user.id, name: student.fullName, email: student.email, phone: student.phone, conversationId: app.lead?.chatwootConversationId },
-    { name: student.fullName, studentCode, course: student.course.name, batch: student.batch?.name ?? 'to be allotted', username: studentCode.toLowerCase(), password: tempPassword, portalUrl: process.env.PUBLIC_APP_URL ?? '' },
+    { name: student.fullName, studentCode, course: student.course.name, batch: student.batch?.name ?? 'to be allotted', username: studentCode.toLowerCase(), link: act.link, hours: act.hours },
+    { channels: ['EMAIL', 'WHATSAPP'], sensitive: true },
   );
   return student.id;
 }

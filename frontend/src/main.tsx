@@ -7,7 +7,7 @@ import { AuthProvider } from './lib/auth';
 import App from './App';
 import './index.css';
 
-const qc = new QueryClient({ defaultOptions: { queries: { retry: (n, e: any) => n < 2 && ![401, 403, 404].includes(e?.status), staleTime: 15_000, refetchOnWindowFocus: false } } });
+const qc = new QueryClient({ defaultOptions: { queries: { retry: (n, e: any) => n < 2 && ![401, 403, 404, 429].includes(e?.status), staleTime: 15_000, refetchOnWindowFocus: false } } });
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

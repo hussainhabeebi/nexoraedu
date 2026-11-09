@@ -16,7 +16,8 @@ export const normalizeEmail = (e?: string | null) => (e ? e.trim().toLowerCase()
 
 export const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 export const randomToken = (bytes = 32) => crypto.randomBytes(bytes).toString('base64url');
-export const randomPassword = () => 'Nx@' + crypto.randomBytes(5).toString('base64url');
+/** Random temporary password that satisfies the policy (≥10 chars, 3+ classes). */
+export const randomPassword = () => 'Nx@' + crypto.randomBytes(12).toString('base64url') + '7a';
 
 function key() {
   const k = config.encryptionKey;

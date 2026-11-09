@@ -1,15 +1,34 @@
 /** Wire approval types to the domain actions they unlock (SRS §22). */
 import { registerApprovalHandler } from './approvals';
 import { admitApplication } from './admissions';
+import { transferEnrollment } from './enrollments';
 import { applyDiscount, cancelPayment } from './finance';
+import { applyFeeAdjustment, rejectFeeAdjustment } from './feeAdjustments';
 import { getSettings } from '../lib/settings';
 import { notifyLater } from './notify';
 import { computeResult } from './exams';
+import { badRequest } from '../lib/http';
 
 export function registerHandlers() {
+  // SRS 22.2: privileged roles are added only after a second Super Administrator approves.
+  registerApprovalHandler('USER_PRIVILEGE', {
+    onApprove: async (tx, r, actor) => {
+      const u = await tx.user.findUniqueOrThrow({ where: { id: r.entityId }, include: { roles: { include: { role: true } } } });
+      if (!u.isActive) throw badRequest('The user has been deactivated since the request was made.');
+      const add: string[] = r.payload?.add ?? [];
+      const roles = await tx.role.findMany({ where: { key: { in: add } } });
+      for (const role of roles) {
+        if (!u.roles.some((x) => x.roleId === role.id)) await tx.userRole.create({ data: { userId: u.id, roleId: role.id } });
+      }
+      // New permissions on the next request; MFA becomes mandatory (sessions without MFA are limited to enrolment).
+      await tx.user.update({ where: { id: u.id }, data: { authVersion: { increment: 1 } } });
+      await tx.auditLog.create({ data: { userId: actor, action: 'GRANT_PRIVILEGED_ROLES', entity: 'user', entityId: u.id, oldValues: { roles: u.roles.map((x) => x.role.key) }, newValues: { added: roles.map((x) => x.key), approvalId: r.id } } });
+    },
+  });
+
   registerApprovalHandler('ADMISSION', {
     onApprove: async (tx, r, actor) => {
-      await admitApplication(tx, r.entityId, r.payload ?? {}, actor);
+      await admitApplication(tx, r.entityId, { ...(r.payload ?? {}), approvalRequestId: r.id }, actor);
     },
     onReject: async (tx, r) => {
       await tx.application.update({ where: { id: r.entityId }, data: { status: 'UNDER_REVIEW' } });
@@ -39,12 +58,20 @@ export function registerHandlers() {
     },
   });
 
+  // SRS 22.6: waivers and custom installment plans, applied only after approval (re-validated at that moment).
+  registerApprovalHandler('FEE_ADJUSTMENT', {
+    onApprove: (tx, r, actor) => applyFeeAdjustment(tx, r.entityId, actor),
+    onReject: (tx, r) => rejectFeeAdjustment(tx, r.entityId),
+  });
+
   registerApprovalHandler('BATCH_TRANSFER', {
     onApprove: async (tx, r, actor) => {
       const st = await tx.student.findUniqueOrThrow({ where: { id: r.entityId }, include: { batch: true } });
-      const to = await tx.batch.findUniqueOrThrow({ where: { id: r.payload.toBatchId } });
-      await tx.student.update({ where: { id: st.id }, data: { batchId: to.id, courseId: to.courseId } });
-      await tx.studentHistory.create({ data: { studentId: st.id, type: 'BATCH', message: `Transferred ${st.batch?.code ?? '—'} → ${to.code}. Reason: ${r.payload.reason}`, userId: actor } });
+      const to = await tx.batch.findUniqueOrThrow({ where: { id: r.payload.toBatchId }, include: { course: true } });
+      // STU-10: the previous enrollment is closed as TRANSFERRED and kept; a new one is opened (capacity re-checked).
+      const out = await transferEnrollment(tx, { studentId: st.id, toBatchId: to.id, reason: r.payload.reason, approvalRequestId: r.id, actorId: actor });
+      const note = out.courseChanged ? ` Course changed to ${to.course.name}: no fee plan is created automatically — Finance must set one up.` : '';
+      await tx.studentHistory.create({ data: { studentId: st.id, type: 'BATCH', message: `${out.closed ? 'Transferred' : 'Batch allotted'} ${st.batch?.code ?? '—'} → ${to.code}. Reason: ${r.payload.reason}.${note}`, userId: actor } });
     },
   });
 
@@ -77,7 +104,7 @@ export function registerHandlers() {
     onApprove: async (tx, r, actor) => {
       await tx.attendance.upsert({
         where: { sessionId_studentId: { sessionId: r.payload.sessionId, studentId: r.payload.studentId } },
-        create: { sessionId: r.payload.sessionId, studentId: r.payload.studentId, status: r.payload.status, markedById: actor },
+        create: { sessionId: r.payload.sessionId, studentId: r.payload.studentId, status: r.payload.status, markedById: actor, enrollmentId: (await tx.enrollment.findFirst({ where: { studentId: r.payload.studentId, status: { in: ['ACTIVE', 'ON_HOLD'] }, batch: { sessions: { some: { id: r.payload.sessionId } } } }, select: { id: true } }))?.id ?? null },
         update: { status: r.payload.status, markedById: actor, markedAt: new Date() },
       });
     },

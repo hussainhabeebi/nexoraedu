@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { FileDown, Percent, Plus, Undo2, XCircle } from 'lucide-react';
+import { CalendarClock, FileDown, Percent, Plus, Trash2, Undo2, XCircle } from 'lucide-react';
 import { api, download } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { useGet, useMasters, useMut } from '@/lib/hooks';
@@ -27,43 +27,118 @@ export function RecordPaymentModal({ open, onClose, studentId, balance }: { open
   );
 }
 
+type Row = { dueDate: string; amount: string };
+const today = () => new Date().toISOString().slice(0, 10);
+const plusMonths = (iso: string, n: number) => { const x = new Date(iso + 'T00:00:00'); x.setMonth(x.getMonth() + n); return x.toISOString().slice(0, 10); };
+const paise = (v: string | number) => Math.round(Number(v || 0) * 100);
+
+/** SRS 22.6: waiver or custom installment plan — always submitted for approval, applied only when approved. */
+function FeeAdjustmentModal({ open, onClose, studentId, plan, unpaid }: { open: boolean; onClose: () => void; studentId: string; plan: any; unpaid: number }) {
+  const [kind, setKind] = useState<'WAIVER' | 'RESCHEDULE'>('WAIVER');
+  const [amount, setAmount] = useState('');
+  const [reason, setReason] = useState('');
+  const [rows, setRows] = useState<Row[]>([]);
+  const split = (n: number) => {
+    const total = paise(unpaid), base = Math.floor(total / n);
+    setRows(Array.from({ length: n }, (_, i) => ({ dueDate: plusMonths(today(), i), amount: ((i === n - 1 ? total - base * (n - 1) : base) / 100).toFixed(2) })));
+  };
+  const sum = rows.reduce((s, r) => s + paise(r.amount), 0);
+  const m = useMut(() => api('/finance/adjustments', { body: kind === 'WAIVER' ? { kind, studentId, feePlanId: plan.id, amount: Number(amount), reason } : { kind, studentId, feePlanId: plan.id, reason, schedule: rows.map((r) => ({ dueDate: r.dueDate, amount: Number(r.amount) })) } }), {
+    success: 'Fee adjustment sent for approval', invalidate: ['/finance', '/students', '/approvals'], onSuccess: () => { onClose(); setAmount(''); setReason(''); setRows([]); },
+  });
+  const valid = reason.trim().length >= 5 && (kind === 'WAIVER' ? Number(amount) > 0 && paise(amount) <= paise(unpaid) : rows.length > 0 && sum === paise(unpaid) && rows.every((r) => r.dueDate >= today() && Number(r.amount) > 0));
+  return (
+    <Modal open={open} onClose={onClose} title="Fee adjustment" size="lg" footer={<><button className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-primary" disabled={!valid || m.isPending} onClick={() => m.mutate(undefined)}>{m.isPending && <Spinner className="h-4 w-4 text-white" />} Submit for approval</button></>}>
+      <div className="space-y-4">
+        <Select label="Adjustment" value={kind} onChange={(e) => { setKind(e.target.value as any); if (e.target.value === 'RESCHEDULE' && !rows.length) split(2); }} options={[{ value: 'WAIVER', label: 'Waive unpaid amount' }, { value: 'RESCHEDULE', label: 'Custom installment plan (reschedule unpaid amount)' }]} />
+        <p className="text-sm text-slate-600">Unpaid on this plan: <span className="font-medium">{inr(unpaid)}</span>. Paid amounts cannot be waived — use a refund instead.</p>
+        {kind === 'WAIVER' ? (
+          <Input label="Amount to waive (₹)" type="number" min={1} step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} error={paise(amount) > paise(unpaid) ? 'More than the unpaid amount' : undefined} hint="Reduces the last installments first." />
+        ) : (
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2 text-sm"><span className="text-slate-500">Split evenly into</span>{[1, 2, 3, 4, 6].map((n) => <button key={n} type="button" className="btn-secondary btn-sm" onClick={() => split(n)}>{n}</button>)}</div>
+            {rows.map((r, i) => (
+              <div key={i} className="flex items-end gap-2">
+                <Input className="flex-1" label={`#${i + 1} due date`} type="date" min={today()} value={r.dueDate} onChange={(e) => setRows(rows.map((x, k) => (k === i ? { ...x, dueDate: e.target.value } : x)))} />
+                <Input className="flex-1" label="Amount (₹)" type="number" step="0.01" min={0} value={r.amount} onChange={(e) => setRows(rows.map((x, k) => (k === i ? { ...x, amount: e.target.value } : x)))} />
+                <button type="button" className="btn-ghost btn-sm text-rose-600" aria-label="Remove installment" onClick={() => setRows(rows.filter((_, k) => k !== i))}><Trash2 className="h-4 w-4" /></button>
+              </div>
+            ))}
+            <button type="button" className="btn-secondary btn-sm" disabled={rows.length >= 24} onClick={() => setRows([...rows, { dueDate: plusMonths(rows[rows.length - 1]?.dueDate ?? today(), 1), amount: '' }])}><Plus className="h-4 w-4" /> Add installment</button>
+            <p className={`text-sm ${sum === paise(unpaid) ? 'text-emerald-700' : 'text-rose-600'}`}>Total {inr(sum / 100)} of {inr(unpaid)}{sum !== paise(unpaid) && ' — must match exactly'}</p>
+          </div>
+        )}
+        <Textarea label="Reason" required value={reason} onChange={(e) => setReason(e.target.value)} hint="At least 5 characters. Shown to the approvers and kept in the audit history." />
+        <p className="text-xs text-slate-500">{kind === 'WAIVER' ? 'Needs Finance Manager approval, and Management at or above the configured threshold.' : 'A custom plan forgives nothing, so it needs Finance Manager approval only.'} Nothing changes until it is approved; if payments change the unpaid amount meanwhile, the request must be re-submitted.</p>
+      </div>
+    </Modal>
+  );
+}
+
 export default function StudentAccount({ studentId }: { studentId: string }) {
   const { can } = useAuth();
   const { data, isLoading } = useGet<any>(`/finance/students/${studentId}/account`);
   const reasons = useMasters('discount_reason');
-  const [modal, setModal] = useState<'' | 'pay' | 'discount' | 'refund' | 'plan'>('');
+  const [modal, setModal] = useState<'' | 'pay' | 'discount' | 'refund' | 'plan' | 'adjust'>('');
+  const [planId, setPlanId] = useState('');
   const [cancel, setCancel] = useState<any>(null);
   const [payRefund, setPayRefund] = useState<any>(null);
   const [disc, setDisc] = useState({ kind: 'FIXED', value: '', reason: '' });
   const [ref, setRef] = useState({ amount: '', reason: '' });
   const [plan, setPlan] = useState('1');
+  const [planReason, setPlanReason] = useState('');
   const inv = ['/finance', '/students', '/dashboard', '/approvals'];
   const cancelM = useMut((reason: string) => api(`/finance/payments/${cancel.id}/cancel-request`, { body: { reason } }), { success: 'Cancellation sent for approval', invalidate: inv, onSuccess: () => setCancel(null) });
-  const discM = useMut(() => api('/finance/discounts', { body: { studentId, ...disc, value: Number(disc.value) } }), { success: (r: any) => (r.approval.status === 'APPROVED' ? 'Discount applied' : 'Discount sent for approval'), invalidate: inv, onSuccess: () => setModal('') });
+  const discM = useMut(() => api('/finance/discounts', { body: { studentId, feePlanId: p?.id, ...disc, value: Number(disc.value) } }), { success: (r: any) => (r.approval.status === 'APPROVED' ? 'Discount applied' : 'Discount sent for approval'), invalidate: inv, onSuccess: () => setModal('') });
   const refM = useMut(() => api('/finance/refunds', { body: { studentId, amount: Number(ref.amount), reason: ref.reason } }), { success: 'Refund request sent for approval', invalidate: inv, onSuccess: () => setModal('') });
   const payRefM = useMut((reference: string) => api(`/finance/refunds/${payRefund.id}/pay`, { body: { reference } }), { success: 'Refund marked paid', invalidate: inv, onSuccess: () => setPayRefund(null) });
-  const planM = useMut(() => api(`/finance/students/${studentId}/fee-plan`, { body: { installments: Number(plan) } }), { success: 'Fee plan created', invalidate: inv, onSuccess: () => setModal('') });
+  const planM = useMut(() => api(`/finance/students/${studentId}/fee-plan`, { body: { installments: Number(plan), ...(planReason.trim() && { reason: planReason.trim() }) } }), {
+    success: (r: any) => (r.needsApproval ? 'New fee plan sent for approval' : 'Fee plan created'), invalidate: inv, onSuccess: () => { setModal(''); setPlanReason(''); },
+  });
 
   if (isLoading || !data) return <PageLoader />;
-  const p = data.plans[0];
+  // Plans are newest first; after a course change the student can have one plan per course enrollment.
+  const p = data.plans.find((x: any) => x.id === planId) ?? data.plans[0];
   const gross = p ? Number(p.grossAmount) : 0;
   const discount = p ? Number(p.discount) : 0;
-  const paid = data.payments.filter((x: any) => x.status !== 'CANCELLED').reduce((s: number, x: any) => s + Number(x.amount), 0);
+  const waived = p ? Number(p.waived ?? 0) : 0;
+  const unpaid = p ? p.installments.filter((i: any) => ['DUE', 'PARTIAL'].includes(i.status)).reduce((s: number, i: any) => s + Number(i.amount) - Number(i.paidAmount), 0) : 0;
+  const pendingAdj = p ? data.adjustments?.find((a: any) => a.feePlanId === p.id && a.status === 'PENDING_APPROVAL') : null;
+  // Receipts are per student (payments are allocated across plans, oldest due first); refunds are per student.
+  const receivedAll = data.payments.filter((x: any) => x.status !== 'CANCELLED').reduce((s: number, x: any) => s + Number(x.amount), 0);
+  // Summary cards describe the SELECTED plan only, so the four figures always add up: total − discounts/waived − paid = balance.
+  const paid = p ? p.installments.reduce((s: number, i: any) => s + Number(i.paidAmount), 0) : 0;
+  const multi = data.plans.length > 1;
+  const planLabel = (x: any) => `${x.enrollment?.course?.name ?? 'Plan'}${x.enrollment?.batch ? ' / ' + x.enrollment.batch.code : ''} — ${d(x.createdAt)}${x.enrollment ? ` (${label(x.enrollment.status)})` : ''}`;
 
   return (
     <div className="space-y-6">
+      {multi && (
+        <Select label="Fee plan" value={p.id} onChange={(e) => setPlanId(e.target.value)} options={data.plans.map((x: any) => ({ value: x.id, label: planLabel(x) }))} hint="The figures and installments below are for this plan." />
+      )}
       <div className="grid gap-4 sm:grid-cols-4">
-        <Stat label="Total fee" value={inr(gross)} />
-        <Stat label="Discounts" value={inr(discount)} tone="violet" />
-        <Stat label="Paid" value={inr(paid)} tone="green" />
-        <Stat label="Balance" value={inr(data.balance)} tone={data.balance > 0 ? 'rose' : 'green'} />
+        <Stat label={multi ? 'Plan fee' : 'Total fee'} value={inr(gross)} />
+        <Stat label={waived ? 'Discounts / waived' : 'Discounts'} value={waived ? `${inr(discount)} / ${inr(waived)}` : inr(discount)} tone="violet" />
+        <Stat label={multi ? 'Paid on this plan' : 'Paid'} value={inr(paid)} tone="green" />
+        <Stat label={multi ? 'Plan balance' : 'Balance'} value={inr(unpaid)} tone={unpaid > 0 ? 'rose' : 'green'} />
       </div>
-      {gross > 0 && <Progress value={((paid + discount) / gross) * 100} tone="green" />}
+      {(multi || Math.abs(Number(data.balance) - unpaid) > 0.005) && (
+        <p className="rounded-lg bg-slate-50 px-4 py-2 text-sm text-slate-600" data-testid="account-balance">
+          Account balance (all plans{Math.abs(Number(data.balance) - unpaid) > 0.005 && !multi ? ', incl. refunds paid' : ''}): <span className="font-semibold text-slate-900">{inr(data.balance)}</span> · Received in total: {inr(receivedAll)}. Payments are allocated to the oldest due installments across all plans.
+        </p>
+      )}
+      {gross > 0 && <Progress value={((paid + discount + waived) / gross) * 100} tone="green" />}
       <div className="flex flex-wrap gap-2">
         {can('finance:collect') && data.balance > 0 && <button className="btn-primary" onClick={() => setModal('pay')}><Plus className="h-4 w-4" /> Record payment</button>}
         {can('finance:collect', 'finance:manage') && p && <button className="btn-secondary" onClick={() => setModal('discount')}><Percent className="h-4 w-4" /> Discount / scholarship</button>}
-        {can('finance:collect', 'finance:manage') && paid > 0 && <button className="btn-secondary" onClick={() => setModal('refund')}><Undo2 className="h-4 w-4" /> Request refund</button>}
-        {can('finance:manage') && !p && <button className="btn-primary" onClick={() => setModal('plan')}>Create fee plan</button>}
+        {can('finance:collect', 'finance:manage') && receivedAll > 0 && <button className="btn-secondary" onClick={() => setModal('refund')}><Undo2 className="h-4 w-4" /> Request refund</button>}
+        {can('finance:collect', 'finance:manage') && p && unpaid > 0 && <button className="btn-secondary" disabled={!!pendingAdj} title={pendingAdj ? 'An adjustment for this plan is awaiting approval' : undefined} onClick={() => setModal('adjust')}><CalendarClock className="h-4 w-4" /> Fee adjustment</button>}
+        {/* B2: a plan for a course the student was already billed for needs approval (decision 2026-11-06). */}
+        {can('finance:manage') && data.newPlan?.allowed && (
+          <button className={p ? 'btn-secondary' : 'btn-primary'} disabled={!!data.newPlan.pendingAdjustmentId} title={data.newPlan.pendingAdjustmentId ? 'A new fee plan for this student is awaiting approval' : undefined} onClick={() => setModal('plan')}>
+            {data.newPlan.needsApproval ? 'Request new fee plan' : 'Create fee plan'}
+          </button>
+        )}
       </div>
 
       <Card title="Installments" bodyClass="p-0">
@@ -72,8 +147,8 @@ export default function StudentAccount({ studentId }: { studentId: string }) {
             <thead className="bg-slate-50"><tr><th className="th">#</th><th className="th">Due date</th><th className="th">Amount</th><th className="th">Paid</th><th className="th">Status</th><th className="th">Invoice</th></tr></thead>
             <tbody className="divide-y divide-slate-100">
               {p.installments.map((i: any) => {
-                const overdue = i.status !== 'PAID' && new Date(i.dueDate) < new Date();
-                return <tr key={i.id}><td className="td">{i.seq}</td><td className="td">{d(i.dueDate)}</td><td className="td">{inr(i.amount)}</td><td className="td">{inr(i.paidAmount)}</td><td className="td"><Badge status={overdue ? 'OVERDUE' : i.status} /></td><td className="td text-xs text-slate-500">{data.invoices.find((x: any) => x.installmentId === i.id)?.number}</td></tr>;
+                const overdue = ['DUE', 'PARTIAL'].includes(i.status) && new Date(i.dueDate) < new Date();
+                return <tr key={i.id} className={i.status === 'SUPERSEDED' ? 'text-slate-400' : undefined}><td className="td">{i.seq}{i.adjustmentId && <span className="ml-1 text-xs text-indigo-600">custom</span>}</td><td className="td">{d(i.dueDate)}</td><td className="td">{inr(i.amount)}</td><td className="td">{inr(i.paidAmount)}</td><td className="td"><Badge status={overdue ? 'OVERDUE' : i.status} /></td><td className="td text-xs text-slate-500">{data.invoices.find((x: any) => x.installmentId === i.id)?.number}</td></tr>;
               })}
             </tbody>
           </table>
@@ -99,9 +174,10 @@ export default function StudentAccount({ studentId }: { studentId: string }) {
         ) : <Empty title="No payments yet" />}
       </Card>
 
-      {(data.discounts.length > 0 || data.refunds.length > 0) && (
-        <Card title="Discounts & refunds" bodyClass="p-0">
+      {(data.discounts.length > 0 || data.refunds.length > 0 || data.adjustments?.length > 0) && (
+        <Card title="Discounts, adjustments & refunds" bodyClass="p-0">
           <ul className="divide-y divide-slate-100">
+            {data.adjustments?.map((x: any) => <li key={x.id} className="flex justify-between px-5 py-3 text-sm"><span>{x.kind === 'WAIVER' ? 'Waiver' : x.kind === 'REBILL' ? `New plan for a course billed before (${x.newPlan?.installments ?? ''} installments)` : `Custom plan (${(x.schedule ?? []).length} installments)`} — {x.reason}</span><span className="flex items-center gap-2">{inr(x.amount)} <Badge status={x.status === 'APPLIED' ? 'APPROVED' : x.status}>{label(x.status)}</Badge></span></li>)}
             {data.discounts.map((x: any) => <li key={x.id} className="flex justify-between px-5 py-3 text-sm"><span>{label(x.kind)} {x.kind === 'PERCENT' && `${Number(x.value)}%`} — {x.reason}</span><span className="flex items-center gap-2">{inr(x.amount)} <Badge status={x.status === 'APPLIED' ? 'APPROVED' : x.status} >{label(x.status)}</Badge></span></li>)}
             {data.refunds.map((x: any) => <li key={x.id} className="flex justify-between px-5 py-3 text-sm"><span>Refund — {x.reason}{x.reference && ` (ref ${x.reference})`}</span><span className="flex items-center gap-2">{inr(x.amount)} <Badge status={x.status} />{x.status === 'APPROVED' && can('finance:manage') && <button className="btn-secondary btn-sm" onClick={() => setPayRefund(x)}>Mark paid</button>}</span></li>)}
           </ul>
@@ -119,25 +195,36 @@ export default function StudentAccount({ studentId }: { studentId: string }) {
         </div>
       </Card>
 
+      {p && <FeeAdjustmentModal open={modal === 'adjust'} onClose={() => setModal('')} studentId={studentId} plan={p} unpaid={unpaid} />}
       <RecordPaymentModal open={modal === 'pay'} onClose={() => setModal('')} studentId={studentId} balance={data.balance} />
       <Modal open={modal === 'discount'} onClose={() => setModal('')} title="Discount / scholarship" footer={<button className="btn-primary" disabled={!disc.value || !disc.reason || discM.isPending} onClick={() => discM.mutate(undefined)}>Submit</button>}>
         <div className="grid gap-4 sm:grid-cols-2">
           <Select label="Type" value={disc.kind} onChange={(e) => setDisc({ ...disc, kind: e.target.value })} options={[{ value: 'FIXED', label: 'Fixed amount' }, { value: 'PERCENT', label: 'Percentage' }, { value: 'SCHOLARSHIP', label: 'Scholarship' }]} />
           <Input label={disc.kind === 'PERCENT' ? 'Percent (%)' : 'Amount (₹)'} type="number" min={0} value={disc.value} onChange={(e) => setDisc({ ...disc, value: e.target.value })} />
+          {p && <p className="sm:col-span-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600" data-testid="discount-plan">Applies to: <span className="font-medium text-slate-900">{multi ? planLabel(p) : 'this fee plan'}</span> · unpaid {inr(unpaid)}{disc.kind === 'PERCENT' && ` · percentage of the plan fee ${inr(gross)}`}</p>}
           <Select className="sm:col-span-2" label="Reason" required value={disc.reason} onChange={(e) => setDisc({ ...disc, reason: e.target.value })} placeholder="Select" options={(reasons.data?.items ?? []).map((r) => ({ value: r.label, label: r.label }))} />
         </div>
         <p className="mt-3 text-xs text-slate-500">Discounts above the configured limit and all scholarships go through the approval workflow.</p>
       </Modal>
       <Modal open={modal === 'refund'} onClose={() => setModal('')} title="Request refund" footer={<button className="btn-primary" disabled={!ref.amount || ref.reason.length < 5 || refM.isPending} onClick={() => refM.mutate(undefined)}>Submit for approval</button>}>
         <div className="space-y-4">
-          <Input label="Amount (₹)" type="number" min={1} value={ref.amount} onChange={(e) => setRef({ ...ref, amount: e.target.value })} hint={`Paid so far: ${inr(paid)}`} />
+          <Input label="Amount (₹)" type="number" min={1} value={ref.amount} onChange={(e) => setRef({ ...ref, amount: e.target.value })} hint={`Received from this student (all plans): ${inr(receivedAll)}`} />
           <Textarea label="Reason (as per refund policy)" required value={ref.reason} onChange={(e) => setRef({ ...ref, reason: e.target.value })} />
         </div>
       </Modal>
-      <Modal open={modal === 'plan'} onClose={() => setModal('')} title="Create fee plan" size="sm" footer={<button className="btn-primary" disabled={planM.isPending} onClick={() => planM.mutate(undefined)}>Create</button>}>
-        <Select label="Installments" value={plan} onChange={(e) => setPlan(e.target.value)} options={[1, 2, 3, 4, 6, 12].map((n) => ({ value: String(n), label: String(n) }))} />
+      <Modal open={modal === 'plan'} onClose={() => setModal('')} title={data.newPlan?.needsApproval ? 'Request new fee plan' : 'Create fee plan'} size={data.newPlan?.needsApproval ? 'md' : 'sm'}
+        footer={<button className="btn-primary" disabled={planM.isPending || (data.newPlan?.needsApproval && planReason.trim().length < 5)} onClick={() => planM.mutate(undefined)}>{data.newPlan?.needsApproval ? 'Submit for approval' : 'Create'}</button>}>
+        <div className="space-y-4">
+          {data.newPlan?.needsApproval && (
+            <p data-testid="rebill-notice" className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+              This student was already billed for this course on an earlier plan. A second plan is created only after Finance Manager and Management approval; nothing is billed until then. Settle or waive the earlier plan's unpaid balance separately.
+            </p>
+          )}
+          <Select label="Installments" value={plan} onChange={(e) => setPlan(e.target.value)} options={[1, 2, 3, 4, 6, 12].map((n) => ({ value: String(n), label: String(n) }))} />
+          {data.newPlan?.needsApproval && <Textarea label="Reason" required value={planReason} onChange={(e) => setPlanReason(e.target.value)} hint="At least 5 characters. Shown to the approvers." />}
+        </div>
       </Modal>
-      <Confirm open={!!cancel} onClose={() => setCancel(null)} title={`Cancel receipt ${cancel?.receiptNumber ?? ''}`} message="Cancellation needs Finance Manager approval. The receipt is retained and marked cancelled; a reversing ledger entry is posted." tone="danger" confirmLabel="Request cancellation" requireReason busy={cancelM.isPending} onConfirm={(r) => cancelM.mutate(r)} />
+      <Confirm open={!!cancel} onClose={() => setCancel(null)} title={`Cancel receipt ${cancel?.receiptNumber ?? ''}`} message="Cancellation needs Finance Manager approval, and Management for larger receipts. The receipt is retained and marked cancelled; a reversing ledger entry is posted." tone="danger" confirmLabel="Request cancellation" requireReason busy={cancelM.isPending} onConfirm={(r) => cancelM.mutate(r)} />
       <Confirm open={!!payRefund} onClose={() => setPayRefund(null)} title="Mark refund as paid" requireReason reasonLabel="Payment reference (UTR / cheque no.)" busy={payRefM.isPending} onConfirm={(r) => payRefM.mutate(r)} />
     </div>
   );

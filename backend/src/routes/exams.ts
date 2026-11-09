@@ -1,11 +1,12 @@
 /** Examination (SRS §13): question bank, scheduling, assignment, evaluation, results, certificates. */
 import { Router } from 'express';
-import PDFDocument from 'pdfkit';
+import PDFDocument from '../lib/pdf';
 import { z } from 'zod';
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '#prisma';
 import { prisma } from '../lib/prisma';
 import { ah, badRequest, conflict, notFound, paging } from '../lib/http';
-import { can } from '../lib/auth';
+import { can, userCan } from '../lib/auth';
+import { batchScopeIds, canAccessBatch } from '../lib/policy';
 import { audit } from '../lib/audit';
 import { nextNumber } from '../lib/sequence';
 import { getSettings } from '../lib/settings';
@@ -15,9 +16,9 @@ import { autoGrade, computeResult } from '../services/exams';
 import { notifyLater } from '../services/notify';
 import { studentBalance } from '../services/finance';
 import { studentAttendancePct } from './academics';
+import { atomic, type Tx } from '../lib/db';
 
 const r = Router();
-type Tx = Prisma.TransactionClient;
 
 // ── Question bank (EXM-03/04/05) ──
 const questionSchema = z.object({
@@ -53,10 +54,12 @@ r.get('/questions', can('exams:read'), ah(async (req, res) => {
     ...(req.query.type && { type: String(req.query.type) }),
     ...(req.query.difficulty && { difficulty: String(req.query.difficulty) }),
     status: req.query.status ? String(req.query.status) : 'ACTIVE',
-    ...(req.query.q && { text: { contains: String(req.query.q), mode: 'insensitive' } }),
+    ...(req.query.q && { text: { contains: String(req.query.q) } }),
   };
   const [items, total] = await Promise.all([prisma.question.findMany({ where, skip, take, orderBy: { createdAt: 'desc' }, include: { _count: { select: { exams: true } } } }), prisma.question.count({ where })]);
-  res.json({ items, total, page, pageSize });
+  // S12: answer keys are visible only to exam managers (Examination Officer / Super Admin).
+  const keys = userCan(req, 'exams:manage');
+  res.json({ items: keys ? items : items.map(({ correct: _c, ...q }) => q), total, page, pageSize });
 }));
 r.post('/questions', can('exams:manage'), ah(async (req, res) => {
   const d = questionSchema.parse(req.body);
@@ -108,8 +111,9 @@ const examSchema = z.object({
 });
 
 r.get('/exams', can('exams:read'), ah(async (req, res) => {
+  const scope = await batchScopeIds(req.user!);
   const items = await prisma.exam.findMany({
-    where: { ...(req.query.courseId && { courseId: String(req.query.courseId) }), ...(req.query.batchId && { batchId: String(req.query.batchId) }), ...(req.query.status && { status: String(req.query.status) }) },
+    where: { ...(req.query.courseId && { courseId: String(req.query.courseId) }), ...(req.query.batchId && { batchId: String(req.query.batchId) }), ...(req.query.status && { status: String(req.query.status) }), ...(scope && { batchId: { in: scope } }) },
     orderBy: { startAt: 'desc' },
     include: { _count: { select: { questions: true, assignments: true, attempts: true, results: true } } },
   });
@@ -121,19 +125,28 @@ r.get('/exams/:id', can('exams:read'), ah(async (req, res) => {
     where: { id: req.params.id },
     include: { questions: { orderBy: { order: 'asc' }, include: { question: true } }, assignments: true, results: { orderBy: { marks: 'desc' } }, attempts: { orderBy: { startedAt: 'desc' } } },
   });
-  if (!e) throw notFound('Exam not found');
+  const scope = await batchScopeIds(req.user!);
+  if (!e || (scope && (!e.batchId || !scope.includes(e.batchId)))) throw notFound('Exam not found'); // faculty: own batches
   const studentIds = [...new Set([...e.assignments.map((a) => a.studentId), ...e.results.map((x) => x.studentId), ...e.attempts.map((x) => x.studentId)])];
   const students = await prisma.student.findMany({ where: { id: { in: studentIds } }, select: { id: true, fullName: true, studentCode: true } });
-  res.json({ ...e, students: Object.fromEntries(students.map((s) => [s.id, s])) });
+  // S12: answer keys and students' raw answers only for exam managers.
+  const full = userCan(req, 'exams:manage');
+  const out = full
+    ? e
+    : { ...e, questions: e.questions.map((q) => ({ ...q, question: { ...q.question, correct: undefined } })), attempts: e.attempts.map(({ answers: _a, questionOrder: _o, manualMarks: _m, ...a }) => a) };
+  res.json({ ...out, students: Object.fromEntries(students.map((s) => [s.id, s])) });
 }));
 
 r.post('/exams', can('exams:manage'), ah(async (req, res) => {
   const d = examSchema.parse(req.body);
   if (d.endAt <= d.startAt) throw badRequest('Exam window end must be after start.');
   if (d.passMarks > d.totalMarks) throw badRequest('Pass marks cannot exceed total marks.');
-  const code = await nextNumber(`exam:${new Date().getFullYear()}`, 'EX-{YYYY}-####');
-  const e = await prisma.exam.create({ data: { ...d, code } });
-  await audit(req, 'CREATE', 'exam', e.id, null, d);
+  const code = await nextNumber('exam:{year}', 'EX-{YYYY}-####');
+  const e = await atomic(async (tx) => {
+    const e = await tx.exam.create({ data: { ...d, code } });
+    await audit(tx, req, 'CREATE', 'exam', e.id, null, d);
+    return e;
+  });
   res.status(201).json(e);
 }));
 
@@ -141,8 +154,11 @@ r.patch('/exams/:id', can('exams:manage'), ah(async (req, res) => {
   const before = await prisma.exam.findUniqueOrThrow({ where: { id: req.params.id }, include: { _count: { select: { attempts: true } } } });
   if (before._count.attempts > 0) throw conflict('This exam already has attempts and cannot be edited.');
   const d = examSchema.partial().parse(req.body);
-  const e = await prisma.exam.update({ where: { id: before.id }, data: d });
-  await audit(req, 'UPDATE', 'exam', e.id, before, d);
+  const e = await atomic(async (tx) => {
+    const e = await tx.exam.update({ where: { id: before.id }, data: d });
+    await audit(tx, req, 'UPDATE', 'exam', e.id, before, d);
+    return e;
+  });
   res.json(e);
 }));
 
@@ -155,7 +171,10 @@ r.put('/exams/:id/questions', can('exams:manage'), ah(async (req, res) => {
     const pool = await prisma.question.findMany({ where: { courseId: exam.courseId, status: 'ACTIVE', ...(random.difficulty && { difficulty: random.difficulty }), ...(random.subjectId && { subjectId: random.subjectId }) }, select: { id: true } });
     ids = pool.sort(() => Math.random() - 0.5).slice(0, random.count).map((q) => q.id);
   }
-  await prisma.$transaction([prisma.examQuestion.deleteMany({ where: { examId: exam.id } }), prisma.examQuestion.createMany({ data: ids.map((questionId, i) => ({ examId: exam.id, questionId, order: i + 1 })) })]);
+  await atomic(async (tx) => {
+    await tx.examQuestion.deleteMany({ where: { examId: exam.id } });
+    await tx.examQuestion.createMany({ data: ids.map((questionId, i) => ({ examId: exam.id, questionId, order: i + 1 })) });
+  });
   const qs = await prisma.question.findMany({ where: { id: { in: ids } }, select: { marks: true } });
   res.json({ count: ids.length, marks: qs.reduce((s, q) => s + q.marks, 0) });
 }));
@@ -165,7 +184,7 @@ async function eligibility(studentId: string) {
   const s = await getSettings();
   const reasons: string[] = [];
   if (s.exams.requireFeesCleared) {
-    const overdue = await prisma.installment.findFirst({ where: { feePlan: { studentId }, status: { not: 'PAID' }, dueDate: { lt: new Date() } } });
+    const overdue = await prisma.installment.findFirst({ where: { feePlan: { studentId }, status: { in: ['DUE', 'PARTIAL'] }, dueDate: { lt: new Date() } } });
     if (overdue) reasons.push('Overdue fees');
   }
   if (s.exams.minAttendanceForExam > 0) {
@@ -189,7 +208,10 @@ r.post('/exams/:id/assign', can('exams:manage'), ah(async (req, res) => {
     if (reasons.length) ineligible.push({ studentId: id, reasons });
     else assigned.push(id);
   }
-  await prisma.examAssignment.createMany({ data: assigned.map((studentId) => ({ examId: exam.id, studentId })), skipDuplicates: true });
+  // SQLite has no createMany skipDuplicates: insert only students that are not assigned yet.
+  const already = new Set((await prisma.examAssignment.findMany({ where: { examId: exam.id, studentId: { in: assigned } }, select: { studentId: true } })).map((x) => x.studentId));
+  const fresh = assigned.filter((s) => !already.has(s));
+  if (fresh.length) await prisma.examAssignment.createMany({ data: fresh.map((studentId) => ({ examId: exam.id, studentId })) });
   res.json({ assigned: assigned.length, ineligible });
 }));
 
@@ -197,7 +219,7 @@ r.post('/exams/:id/exception', can('exams:manage'), ah(async (req, res) => {
   const { studentId, reason, reattempt } = z.object({ studentId: z.string(), reason: z.string().min(3), reattempt: z.boolean().default(false) }).parse(req.body);
   const exam = await prisma.exam.findUniqueOrThrow({ where: { id: req.params.id } });
   const st = await prisma.student.findUniqueOrThrow({ where: { id: studentId } });
-  const a = await prisma.$transaction((tx) => createApproval(tx, { type: 'EXAM_REATTEMPT', entityType: 'exam', entityId: exam.id, title: `${reattempt ? 'Re-attempt' : 'Eligibility exception'}: ${st.fullName} — ${exam.title}`, payload: { examId: exam.id, studentId, reason, reattempt }, requestedById: req.user!.id }));
+  const a = await atomic((tx) => createApproval(tx, { type: 'EXAM_REATTEMPT', entityType: 'exam', entityId: exam.id, title: `${reattempt ? 'Re-attempt' : 'Eligibility exception'}: ${st.fullName} — ${exam.title}`, payload: { examId: exam.id, studentId, reason, reattempt }, requestedById: req.user!.id }));
   res.json({ approval: a });
 }));
 
@@ -205,10 +227,12 @@ r.post('/exams/:id/schedule', can('exams:manage'), ah(async (req, res) => {
   const exam = await prisma.exam.findUniqueOrThrow({ where: { id: req.params.id }, include: { _count: { select: { questions: true } }, assignments: true } });
   if (exam.mode === 'ONLINE' && exam._count.questions === 0) throw badRequest('Add questions before scheduling an online exam.');
   if (!exam.assignments.length) throw badRequest('Assign students before scheduling.');
-  await prisma.exam.update({ where: { id: exam.id }, data: { status: 'SCHEDULED' } });
+  await atomic(async (tx) => {
+    await tx.exam.update({ where: { id: exam.id }, data: { status: 'SCHEDULED' } });
+    await audit(tx, req, 'SCHEDULE', 'exam', exam.id, { status: exam.status }, { status: 'SCHEDULED', students: exam.assignments.length });
+  });
   const students = await prisma.student.findMany({ where: { id: { in: exam.assignments.map((a) => a.studentId) } } });
   for (const s of students) notifyLater('exam.scheduled', { userId: s.userId, name: s.fullName, phone: s.phone, email: s.email }, { name: s.fullName, exam: exam.title, start: exam.startAt.toLocaleString('en-IN'), duration: exam.durationMin, mode: exam.mode.toLowerCase() });
-  await audit(req, 'SCHEDULE', 'exam', exam.id);
   res.json({ ok: true, notified: students.length });
 }));
 
@@ -231,8 +255,11 @@ r.post('/attempts/:id/evaluate', can('exams:manage'), ah(async (req, res) => {
     if (m > q.marks) throw badRequest(`Marks for a question cannot exceed ${q.marks}.`);
   }
   const manual = Object.values(marks).reduce((s, m) => s + m, 0);
-  const u = await prisma.examAttempt.update({ where: { id: a.id }, data: { manualMarks: marks, manualScore: manual, status: 'EVALUATED' } });
-  await audit(req, 'EVALUATE', 'exam_attempt', a.id, null, { marks });
+  const u = await atomic(async (tx) => {
+    const u = await tx.examAttempt.update({ where: { id: a.id }, data: { manualMarks: marks, manualScore: manual, status: 'EVALUATED' } });
+    await audit(tx, req, 'EVALUATE', 'exam_attempt', a.id, { manualMarks: a.manualMarks, manualScore: a.manualScore }, { marks, manualScore: manual });
+    return u;
+  });
   res.json(u);
 }));
 
@@ -250,10 +277,11 @@ r.post('/exams/:id/marks', can('exams:manage'), ah(async (req, res) => {
   const exam = await prisma.exam.findUniqueOrThrow({ where: { id: req.params.id } });
   const bad = entries.find((e) => e.marks > exam.totalMarks);
   if (bad) throw badRequest(`Marks cannot exceed the maximum of ${exam.totalMarks}.`);
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
+    const before = await tx.result.findMany({ where: { examId: exam.id, studentId: { in: entries.map((e) => e.studentId) } }, select: { studentId: true, marks: true } });
     for (const e of entries) await upsertResult(tx, exam, e.studentId, e.marks);
+    await audit(tx, req, 'MARKS_ENTRY', 'exam', exam.id, before, entries); // 24.6: field-level old/new marks
   });
-  await audit(req, 'MARKS_ENTRY', 'exam', exam.id, null, { count: entries.length });
   res.json({ ok: true });
 }));
 
@@ -267,37 +295,46 @@ r.post('/exams/:id/process', can('exams:manage'), ah(async (req, res) => {
     const total = (a.autoScore ?? 0) + (a.manualScore ?? 0);
     best.set(a.studentId, Math.max(best.get(a.studentId) ?? 0, total));
   }
-  await prisma.$transaction(async (tx) => {
+  await atomic(async (tx) => {
     for (const [sid, m] of best) await upsertResult(tx, exam, sid, Math.min(m, exam.totalMarks));
+    await tx.exam.update({ where: { id: exam.id }, data: { status: 'COMPLETED' } });
+    await audit(tx, req, 'PROCESS_RESULTS', 'exam', exam.id, null, { processed: best.size });
   });
-  await prisma.exam.update({ where: { id: exam.id }, data: { status: 'COMPLETED' } });
   res.json({ processed: best.size });
 }));
 
 r.post('/exams/:id/lock', can('exams:manage'), ah(async (req, res) => {
-  const u = await prisma.result.updateMany({ where: { examId: req.params.id }, data: { locked: true } });
-  await audit(req, 'LOCK', 'exam_results', req.params.id, null, { count: u.count });
+  const u = await atomic(async (tx) => {
+    const u = await tx.result.updateMany({ where: { examId: req.params.id }, data: { locked: true } });
+    await audit(tx, req, 'LOCK', 'exam_results', req.params.id, null, { count: u.count });
+    return u;
+  });
   res.json({ locked: u.count });
 }));
 
 r.post('/exams/:id/publish', can('exams:manage'), ah(async (req, res) => {
   const exam = await prisma.exam.findUniqueOrThrow({ where: { id: req.params.id }, include: { results: { include: { student: true } } } });
   if (!exam.results.length) throw badRequest('No results to publish.');
-  await prisma.$transaction([prisma.result.updateMany({ where: { examId: exam.id }, data: { locked: true } }), prisma.exam.update({ where: { id: exam.id }, data: { resultsPublished: true, status: 'COMPLETED' } })]);
+  await atomic(async (tx) => {
+    await tx.result.updateMany({ where: { examId: exam.id }, data: { locked: true } });
+    await tx.exam.update({ where: { id: exam.id }, data: { resultsPublished: true, status: 'COMPLETED' } });
+    await audit(tx, req, 'PUBLISH', 'exam_results', exam.id, null, { results: exam.results.length });
+  });
   for (const r0 of exam.results) {
     const s = r0.student;
     notifyLater('result.published', { userId: s.userId, name: s.fullName, phone: s.phone, email: s.email }, { name: s.fullName, exam: exam.title, marks: r0.marks, total: exam.totalMarks, grade: r0.grade, status: r0.passed ? 'PASSED' : 'NOT PASSED' });
   }
-  await audit(req, 'PUBLISH', 'exam_results', exam.id);
   res.json({ published: exam.results.length });
 }));
 
 // EXM-18 correction via approval
 r.post('/results/:id/correction', can('exams:manage', 'materials:manage'), ah(async (req, res) => {
   const { newMarks, reason, evidence } = z.object({ newMarks: z.coerce.number().min(0), reason: z.string().min(5), evidence: z.string().min(3) }).parse(req.body);
-  const rs = await prisma.result.findUniqueOrThrow({ where: { id: req.params.id }, include: { exam: true, student: true } });
+  const rs = await prisma.result.findUnique({ where: { id: req.params.id }, include: { exam: true, student: true } });
+  // Faculty may request corrections only for exams of their own batches (22.7).
+  if (!rs || (!userCan(req, 'exams:manage') && !(await canAccessBatch(req.user!, rs.exam.batchId)))) throw notFound('Result not found');
   if (newMarks > rs.exam.totalMarks) throw badRequest(`Marks cannot exceed ${rs.exam.totalMarks}.`);
-  const a = await prisma.$transaction((tx) => createApproval(tx, { type: 'RESULT_CORRECTION', entityType: 'result', entityId: rs.id, title: `Result correction: ${rs.student.fullName} — ${rs.exam.title} (${rs.marks} → ${newMarks})`, payload: { oldMarks: rs.marks, newMarks, reason, evidence }, requestedById: req.user!.id }));
+  const a = await atomic((tx) => createApproval(tx, { type: 'RESULT_CORRECTION', entityType: 'result', entityId: rs.id, title: `Result correction: ${rs.student.fullName} — ${rs.exam.title} (${rs.marks} → ${newMarks})`, payload: { oldMarks: rs.marks, newMarks, reason, evidence }, requestedById: req.user!.id }));
   res.json({ approval: a });
 }));
 
@@ -317,8 +354,8 @@ r.post('/certificates', can('exams:manage'), ah(async (req, res) => {
   const existing = await prisma.certificate.findFirst({ where: { studentId, courseId: st.courseId, status: { in: ['ISSUED', 'PENDING_APPROVAL'] } } });
   if (existing) throw conflict(`Certificate ${existing.number} already ${existing.status === 'ISSUED' ? 'issued' : 'pending approval'}.`);
   const s = await getSettings();
-  const out = await prisma.$transaction(async (tx) => {
-    const number = await nextNumber(`certificate:${new Date().getFullYear()}`, s.ids.certificate, tx);
+  const out = await atomic(async (tx) => {
+    const number = await nextNumber('certificate:{year}', s.ids.certificate, tx);
     const c = await tx.certificate.create({ data: { number, studentId, courseId: st.courseId, verificationCode: randomToken(9).toUpperCase().replace(/[^A-Z0-9]/g, 'X').slice(0, 10) } });
     const a = await createApproval(tx, { type: 'CERTIFICATE', entityType: 'certificate', entityId: c.id, title: `Certificate ${number} — ${st.fullName} (${st.course.name})`, requestedById: req.user!.id });
     return { certificate: c, approval: a };
@@ -343,6 +380,10 @@ export async function certificatePdf(id: string, out: NodeJS.WritableStream) {
   doc.end();
 }
 r.get('/certificates/:id/pdf', can('exams:read'), ah(async (req, res) => {
+  if (!userCan(req, 'exams:manage')) {
+    const c = await prisma.certificate.findUnique({ where: { id: req.params.id }, include: { student: { select: { batchId: true } } } });
+    if (!c || !(await canAccessBatch(req.user!, c.student.batchId))) throw notFound('Certificate not found');
+  }
   res.setHeader('Content-Type', 'application/pdf');
   await certificatePdf(req.params.id, res);
 }));
