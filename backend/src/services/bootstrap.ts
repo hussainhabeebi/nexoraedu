@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { UNUSABLE_PASSWORD } from '../lib/password';
 import { sha256 } from '../lib/util';
 import { atomic } from '../lib/db';
+import { resetPasswordLink } from '../lib/links';
 
 export const ACTIVATION_MINUTES = 60;
 
@@ -40,7 +41,7 @@ export async function bootstrapSuperAdmin(prisma: PrismaClient, a: { email: stri
     const token = crypto.randomBytes(32).toString('base64url');
     await tx.passwordReset.create({ data: { userId: user.id, purpose: 'ENROLL', tokenHash: sha256(token), expiresAt: new Date(Date.now() + ACTIVATION_MINUTES * 60_000) } });
     await tx.auditLog.create({ data: { action: 'BOOTSTRAP_SUPER_ADMIN', entity: 'user', entityId: user.id, newValues: { username: user.username, email: user.email, second: !!d.second, nomination: d.nomination ?? null } } });
-    return { userId: user.id, token, link: `${publicAppUrl.replace(/\/$/, '')}/reset-password?token=${token}&activate=1` };
+    return { userId: user.id, token, link: resetPasswordLink(token, { activate: true, publicAppUrl }) };
   });
 }
 
@@ -93,6 +94,6 @@ export async function reissueActivation(
         ip: meta.ip, userAgent: meta.userAgent?.slice(0, 300), requestId: meta.requestId,
       },
     });
-    return { userId: u.id, token, link: `${publicAppUrl.replace(/\/$/, '')}/reset-password?token=${token}&activate=1`, previousLinksInvalidated: revoked.count };
+    return { userId: u.id, token, link: resetPasswordLink(token, { activate: true, publicAppUrl }), previousLinksInvalidated: revoked.count };
   });
 }

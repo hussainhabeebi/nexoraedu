@@ -153,3 +153,46 @@ describe('eligibility (refused once the account has been activated)', () => {
     expect(await prisma.auditLog.count({ where: { action: 'BOOTSTRAP_ACTIVATION_REISSUED', entityId: { in: [a.u.id, b.u.id] } } })).toBe(0);
   });
 });
+
+describe('activation link format (regression: links must open the frontend page, never an API route)', () => {
+  const assertFrontendLink = (link: string, origin: string) => {
+    const u = new URL(link);
+    expect(u.origin).toBe(origin);
+    expect(u.pathname).toBe('/reset-password');
+    expect(link).not.toContain('/api/v1/auth');
+    expect(link).not.toContain('/api/');
+    expect(u.searchParams.get('token')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(u.searchParams.get('activate')).toBe('1');
+  };
+
+  it('re-issue builds PUBLIC_APP_URL origin + /reset-password?token=…&activate=1', async () => {
+    const { body } = await pendingSuperAdmin();
+    const r = await reissue(body);
+    expect(r.status).toBe(201);
+    assertFrontendLink(r.body.activationLink, 'https://staging.example.invalid');
+  });
+
+  it('a PUBLIC_APP_URL that wrongly includes a path (e.g. /api/v1/auth) still yields the frontend page', async () => {
+    config.publicAppUrl = 'https://staging.example.invalid/api/v1/auth/';
+    try {
+      const { body } = await pendingSuperAdmin();
+      const r = await reissue(body);
+      expect(r.status).toBe(201);
+      assertFrontendLink(r.body.activationLink, 'https://staging.example.invalid');
+    } finally {
+      config.publicAppUrl = 'https://staging.example.invalid';
+    }
+  });
+
+  it('every link builder uses the same rule (bootstrap, activation, password reset)', async () => {
+    const { resetPasswordLink } = await import('../src/lib/links');
+    const t = 'A'.repeat(43);
+    for (const base of ['https://staging.example.invalid', 'https://staging.example.invalid/', 'https://staging.example.invalid/api/v1/auth']) {
+      assertFrontendLink(resetPasswordLink(t, { activate: true, publicAppUrl: base }), 'https://staging.example.invalid');
+      const reset = new URL(resetPasswordLink(t, { publicAppUrl: base }));
+      expect(reset.pathname).toBe('/reset-password');
+      expect(reset.searchParams.get('activate')).toBeNull();
+    }
+  });
+});
+

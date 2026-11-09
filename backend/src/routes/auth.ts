@@ -16,6 +16,7 @@ import { Router, type NextFunction, type Request, type Response } from 'express'
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { D1Store } from '../lib/rate-store';
+import { resetPasswordLink } from '../lib/links';
 import { ACTIVATION_MINUTES, bootstrapSuperAdmin, reissueActivation, ReissueRefused } from '../services/bootstrap';
 
 /** Limiters are created in a fixed order at start-up, so every Worker instance uses the same D1 key prefixes. */
@@ -341,7 +342,7 @@ r.post('/forgot-password', limiter, ah(async (req, res) => {
   if (user) {
     const token = randomToken(32);
     await prisma.passwordReset.create({ data: { userId: user.id, purpose: 'RESET', tokenHash: sha256(token), expiresAt: new Date(Date.now() + 30 * 60_000) } });
-    const link = `${config.publicAppUrl}/reset-password?token=${token}`;
+    const link = resetPasswordLink(token);
     notify('auth.password_reset', { userId: user.id, name: user.name, email: user.email, phone: user.phone }, { name: user.name, link }, { channels: ['EMAIL', 'WHATSAPP'], sensitive: true }).catch(() => undefined);
   }
   res.json({ ok: true, message: 'If an account exists, a reset link has been sent to the registered email / WhatsApp.' });
