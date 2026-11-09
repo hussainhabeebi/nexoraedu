@@ -17,8 +17,7 @@
     "run_worker_first": ["/api/*", "/health"]
   },
   "d1_databases": [
-    // database_id: copy from Dashboard → Storage & Databases → D1 → nexora-erp-prod (created on approval).
-    { "binding": "DB", "database_name": "nexora-erp-prod", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "backend/migrations" }
+    { "binding": "DB", "database_name": "nexora-erp-prod", "database_id": "0646b36b-ef11-4b46-8a1c-1e1a1f9c4c9f", "migrations_dir": "backend/migrations" }
   ],
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "nexora-files-prod" }],
   "triggers": { "crons": ["* * * * *", "*/5 * * * *", "30 3 * * *"] },
