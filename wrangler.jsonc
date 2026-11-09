@@ -34,7 +34,7 @@
       "name": "nexoraedu-staging",
       "define": { "import.meta.url": "\"file:///bundle/worker.js\"" },
       "d1_databases": [
-        { "binding": "DB", "database_name": "nexora-erp-staging", "database_id": "00000000-0000-0000-0000-000000000001", "migrations_dir": "backend/migrations" }
+        { "binding": "DB", "database_name": "nexora-erp-staging", "database_id": "3af5cc87-e1d8-423f-b5fa-99fd337afee2", "migrations_dir": "backend/migrations" }
       ],
       "r2_buckets": [{ "binding": "FILES", "bucket_name": "nexora-files-staging" }],
       "triggers": { "crons": ["* * * * *", "*/5 * * * *", "30 3 * * *"] },
