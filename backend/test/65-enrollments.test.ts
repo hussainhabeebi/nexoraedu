@@ -62,6 +62,16 @@ describe('New enrollment on admission (CRM-13, 22.3 unchanged)', () => {
     expect(e).toMatchObject({ source: 'DIRECT', status: 'ACTIVE' });
     expect((await prisma.feePlan.findFirstOrThrow({ where: { studentId: r.body.id } })).enrollmentId).toBe(e.id);
   });
+
+  it('staff registration accepts declaration: false (no declaration on the staff form); the public form still requires it', async () => {
+    const u = uniq();
+    const personal = { fullName: `Declared ${u}`, dob: '2000-01-01', gender: 'Male', phone: `+9175${u}`, email: `declared${u}@example.invalid`, address: '1 Synthetic Lane' };
+    const staff = await request(app).post('/api/v1/students').set(as(office)).send({ data: { personal, preferences: { courseId: fsdCourseId, batchId: fsdBatches[0] }, declaration: false } }); // exactly what the staff form used to send
+    expect(staff.status, JSON.stringify(staff.body)).toBe(201);
+    const pub = await request(app).post('/api/v1/public/applications').field('data', JSON.stringify({ personal: { ...personal, phone: `+9174${u}`, email: `pub${u}@example.invalid` }, preferences: { courseId: fsdCourseId }, declaration: false }));
+    expect(pub.status).toBe(400);
+    expect(pub.body.error.message).toMatch(/declaration/);
+  });
 });
 
 describe('Transfers, course changes and history (STU-10, 21.3)', () => {

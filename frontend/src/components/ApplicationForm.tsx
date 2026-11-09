@@ -99,6 +99,7 @@ export default function ApplicationForm({ initial, mode, onSubmit, submitLabel =
     setApiErr(null);
     try {
       const clean: AppData = { ...f, education: f.education.filter((x) => x.level && x.institution), guardians: f.guardians };
+      if (mode !== 'public') delete clean.declaration; // the declaration is only part of the public application
       await onSubmit(clean, files);
       setDirty(false);
     } catch (e) {

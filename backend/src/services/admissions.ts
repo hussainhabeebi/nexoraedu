@@ -40,7 +40,8 @@ export const applicationDataSchema = z.object({
   guardians: z.array(guardianSchema).default([]),
   education: z.array(educationSchema).default([]),
   preferences: z.object({ courseId: z.string(), batchId: z.string().optional().nullable(), mode: z.string().optional() }),
-  declaration: z.literal(true).optional(),
+  // Staff registration has no declaration checkbox and may send false; the public application route requires true.
+  declaration: z.boolean().optional(),
 });
 export type ApplicationData = z.infer<typeof applicationDataSchema>;
 
