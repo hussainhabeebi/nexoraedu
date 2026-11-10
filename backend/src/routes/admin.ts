@@ -15,6 +15,7 @@ import { isValidTimeZone } from '../lib/caldate';
 import { notifyLater } from '../services/notify';
 import { APPROVAL_TYPES, assertWorkflowLevels, createApproval, MANDATORY_APPROVAL_TYPES } from '../services/approvals';
 import { atomic, type Tx } from '../lib/db';
+import { DELETE_SPECS, deleteIfUnused } from '../services/setupDelete';
 
 const r = Router();
 
@@ -422,5 +423,9 @@ r.get('/integration-logs', can('settings:manage', 'audit:read'), ah(async (req, 
   await audit(prisma, req, 'VIEW', 'integration_logs', null, null, { page });
   res.json({ items, total, page, pageSize });
 }));
+
+
+// Departments: deleted only while no user belongs to them (services/setupDelete.ts).
+r.delete('/departments/:id', can('masters:manage'), ah(async (req, res) => res.json(await deleteIfUnused(DELETE_SPECS.department, req.params.id, req))));
 
 export default r;

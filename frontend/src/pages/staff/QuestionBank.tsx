@@ -1,26 +1,29 @@
 import { useState } from 'react';
-import { Archive, Plus, Upload } from 'lucide-react';
+import { Archive, Pencil, Plus, Trash2, Upload } from 'lucide-react';
 import { api, qs } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { useCourses, useGet, useMut } from '@/lib/hooks';
+import { confirmDelete, useCourses, useDelete, useGet, useMut } from '@/lib/hooks';
 import { label } from '@/lib/format';
 import { parseCsv } from '@/lib/csv';
 import { DataTable } from '@/components/DataTable';
 import { Badge, Input, Modal, PageHeader, Select, Textarea } from '@/components/ui';
 
-function QuestionModal({ open, onClose, courseId }: { open: boolean; onClose: () => void; courseId: string }) {
+function QuestionModal({ open, onClose, courseId, question }: { open: boolean; onClose: () => void; courseId: string; question?: any }) {
   const courses = useCourses();
-  const [f, setF] = useState<any>({ courseId, subjectId: '', topic: '', difficulty: 'MEDIUM', type: 'MCQ_SINGLE', text: '', options: ['', '', '', ''], correct: [] as string[], marks: 1, negativeMarks: 0 });
+  const [f, setF] = useState<any>(() => question
+    ? { courseId: question.courseId, subjectId: question.subjectId ?? '', topic: question.topic ?? '', difficulty: question.difficulty ?? 'MEDIUM', type: question.type, text: question.text, options: [...(question.options ?? []), '', '', '', ''].slice(0, Math.max(4, (question.options ?? []).length)), correct: question.correct == null ? [] : ([] as string[]).concat(question.correct).map(String), marks: Number(question.marks ?? 1), negativeMarks: Number(question.negativeMarks ?? 0) }
+    : { courseId, subjectId: '', topic: '', difficulty: 'MEDIUM', type: 'MCQ_SINGLE', text: '', options: ['', '', '', ''], correct: [] as string[], marks: 1, negativeMarks: 0 });
   const course = useGet<any>(f.courseId ? `/academics/courses/${f.courseId}` : null);
   const isMcq = f.type.startsWith('MCQ');
   const m = useMut(() => {
     const options = isMcq ? f.options.filter((o: string) => o.trim()) : undefined;
     const correct = f.type === 'MCQ_SINGLE' ? f.correct[0] : f.type === 'MCQ_MULTI' ? f.correct : f.type === 'TRUE_FALSE' ? f.correct[0] : null;
-    return api('/exams/questions', { body: { ...f, subjectId: f.subjectId || null, options, correct, marks: Number(f.marks), negativeMarks: Number(f.negativeMarks) } });
-  }, { success: 'Question added', invalidate: ['/exams'], onSuccess: onClose });
+    const body = { ...f, subjectId: f.subjectId || null, options, correct, marks: Number(f.marks), negativeMarks: Number(f.negativeMarks) };
+    return question ? api(`/exams/questions/${question.id}`, { method: 'PATCH', body }) : api('/exams/questions', { body });
+  }, { success: question ? 'Question updated' : 'Question added', invalidate: ['/exams'], onSuccess: onClose });
   const toggle = (o: string) => setF({ ...f, correct: f.type === 'MCQ_MULTI' ? (f.correct.includes(o) ? f.correct.filter((x: string) => x !== o) : [...f.correct, o]) : [o] });
   return (
-    <Modal open={open} onClose={onClose} title="New question" size="lg" footer={<button className="btn-primary" disabled={!f.courseId || f.text.length < 3 || m.isPending} onClick={() => m.mutate(undefined)}>Save question</button>}>
+    <Modal open={open} onClose={onClose} title={question ? "Edit question" : "New question"} size="lg" footer={<button className="btn-primary" disabled={!f.courseId || f.text.length < 3 || m.isPending} onClick={() => m.mutate(undefined)}>Save question</button>}>
       <div className="grid gap-4 sm:grid-cols-3">
         <Select label="Course" required value={f.courseId} onChange={(e) => setF({ ...f, courseId: e.target.value })} placeholder="Select" options={(courses.data?.items ?? []).map((c) => ({ value: c.id, label: c.name }))} />
         <Select label="Subject" value={f.subjectId} onChange={(e) => setF({ ...f, subjectId: e.target.value })} placeholder="—" options={(course.data?.subjects ?? []).map((s: any) => ({ value: s.id, label: s.name }))} />
@@ -45,6 +48,8 @@ export default function QuestionBank() {
   const { data, isLoading } = useGet<any>(`/exams/questions${qs({ ...f, page, pageSize: 25 })}`);
   const [modal, setModal] = useState<'' | 'new' | 'import'>('');
   const [imp, setImp] = useState<{ courseId: string; rows: any[]; report?: any }>({ courseId: '', rows: [] });
+  const del = useDelete('Question', ['/exams']);
+  const [editing, setEditing] = useState<any>(null);
   const retire = useMut((id: string) => api(`/exams/questions/${id}`, { method: 'PATCH', body: { status: 'RETIRED' } }), { success: 'Question retired', invalidate: ['/exams'] });
   const doImport = useMut(() => api('/exams/questions/import', { body: { courseId: imp.courseId, rows: imp.rows } }), { invalidate: ['/exams'], onSuccess: (r: any) => setImp({ ...imp, report: r }) });
   return (
@@ -64,9 +69,16 @@ export default function QuestionBank() {
           { key: 'diff', header: 'Difficulty', cell: (r: any) => <Badge status={r.difficulty === 'HARD' ? 'REJECTED' : r.difficulty === 'EASY' ? 'APPROVED' : 'PENDING'}>{label(r.difficulty)}</Badge> },
           { key: 'marks', header: 'Marks', cell: (r: any) => r.marks },
           { key: 'used', header: 'Used in', cell: (r: any) => `${r._count.exams} exam(s)` },
-          { key: 'act', header: '', cell: (r: any) => can('exams:manage') && r.status === 'ACTIVE' && <button className="btn-ghost btn-sm" onClick={() => retire.mutate(r.id)} title="Retire"><Archive className="h-4 w-4" /></button> },
+          { key: 'act', header: '', cell: (r: any) => can('exams:manage') && (
+            <span className="flex justify-end gap-1">
+              {r._count.exams === 0 && <button className="btn-ghost btn-sm" onClick={() => setEditing(r)} title="Edit" aria-label="Edit question"><Pencil className="h-4 w-4" /></button>}
+              {r.status === 'ACTIVE' && <button className="btn-ghost btn-sm" onClick={() => retire.mutate(r.id)} title="Retire" aria-label="Retire question"><Archive className="h-4 w-4" /></button>}
+              {r._count.exams === 0 && <button className="btn-ghost btn-sm text-rose-600" onClick={() => confirmDelete('this question') && del.mutate(`/exams/questions/${r.id}`)} title="Delete" aria-label="Delete question"><Trash2 className="h-4 w-4" /></button>}
+            </span>
+          ) },
         ]} />
       {modal === 'new' && <QuestionModal open onClose={() => setModal('')} courseId={f.courseId} />}
+      {editing && <QuestionModal open onClose={() => setEditing(null)} courseId={editing.courseId} question={editing} />}
       <Modal open={modal === 'import'} onClose={() => { setModal(''); setImp({ courseId: '', rows: [] }); }} title="Import questions" size="lg" footer={!imp.report && <button className="btn-primary" disabled={!imp.courseId || !imp.rows.length || doImport.isPending} onClick={() => doImport.mutate(undefined)}>Import {imp.rows.length}</button>}>
         {imp.report ? <div className="text-sm"><p className="font-medium">{imp.report.created} imported.</p><ul className="mt-2 max-h-64 overflow-auto text-rose-700">{imp.report.report.filter((x: any) => !x.ok).map((x: any) => <li key={x.row}>Row {x.row}: {x.error}</li>)}</ul></div> : (
           <div className="space-y-4">

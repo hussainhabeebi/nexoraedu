@@ -35,6 +35,16 @@ const MAX_ATTEMPTS = 12;
 const CONFLICT = 'NEXORA_CONFLICT';
 
 /** Same text format Prisma uses for DateTime in SQLite, so comparisons in SQL stay correct. */
+/** Table and column names of a Prisma model/field (from the schema), for hand-written SQL checks. */
+export function sqlName(modelName: string, field?: string): string {
+  const m = MODELS[modelName];
+  if (!m) throw new Error(`Unknown model ${modelName}`);
+  if (!field) return `"${m.table}"`;
+  const f = m.fields[field];
+  if (!f || f.kind === 'relation') throw new Error(`Unknown column ${modelName}.${field}`);
+  return `"${f.column ?? field}"`;
+}
+
 export const dbDate = (d: Date | string | number) => new Date(d).toISOString().replace('Z', '+00:00');
 /** Money and percentages: 2 decimals (the database rejects anything else). */
 export const round2 = (v: number) => Math.round((v + Number.EPSILON) * 100) / 100;

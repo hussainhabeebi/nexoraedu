@@ -1,14 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { CheckCircle2, Copy, Plus, Trash2, XCircle } from 'lucide-react';
+import { CheckCircle2, Copy, Pencil, Plus, Trash2, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { useGet, useMut } from '@/lib/hooks';
+import { confirmDelete, useDelete, useGet, useMut } from '@/lib/hooks';
 import { label } from '@/lib/format';
 import { Badge, Card, Input, Modal, PageHeader, PageLoader, Select, Spinner, Tabs, Textarea } from '@/components/ui';
 
-type Tab = 'general' | 'whatsapp' | 'masters' | 'workflows' | 'templates';
+type Tab = 'general' | 'whatsapp' | 'masters' | 'departments' | 'workflows' | 'templates';
 
 function WhatsAppSettings() {
   const { data, isLoading } = useGet<any>('/whatsapp/config');
@@ -80,16 +80,47 @@ function Masters() {
   const [n, setN] = useState({ code: '', label: '' });
   const add = useMut(() => api('/admin/masters', { body: { type, ...n } }), { success: 'Added', invalidate: ['/admin'], onSuccess: () => setN({ code: '', label: '' }) });
   const tog = useMut((m: any) => api(`/admin/masters/${m.id}`, { method: 'PATCH', body: { isActive: !m.isActive } }), { invalidate: ['/admin'] });
+  const relabel = useMut(({ id, label: l }: any) => api(`/admin/masters/${id}`, { method: 'PATCH', body: { label: l } }), { success: 'Saved', invalidate: ['/admin'] });
+  const editLabel = (m: any) => {
+    const l = window.prompt('Label', m.label);
+    if (l && l.trim() && l.trim() !== m.label) relabel.mutate({ id: m.id, label: l.trim() });
+  };
   if (!data) return <PageLoader />;
   return (
     <div className="grid gap-6 lg:grid-cols-[220px_1fr]">
       <Card bodyClass="p-2" className="h-fit"><ul>{data.types.map((t: string) => <li key={t}><button className={`w-full rounded-lg px-3 py-2 text-left text-sm ${type === t ? 'bg-brand-50 font-medium text-brand-700' : 'hover:bg-slate-50'}`} onClick={() => setType(t)}>{label(t)}</button></li>)}</ul></Card>
       <Card title={label(type)} bodyClass="p-0">
-        <ul className="divide-y divide-slate-100">{data.items.filter((m: any) => m.type === type).map((m: any) => <li key={m.id} className="flex items-center justify-between px-5 py-2.5 text-sm"><span>{m.label} <span className="font-mono text-xs text-slate-400">{m.code}</span></span><button className="btn-ghost btn-sm" onClick={() => tog.mutate(m)}><Badge status={m.isActive ? 'ACTIVE' : 'WITHDRAWN'}>{m.isActive ? 'Active' : 'Inactive'}</Badge></button></li>)}</ul>
+        <ul className="divide-y divide-slate-100">{data.items.filter((m: any) => m.type === type).map((m: any) => <li key={m.id} className="flex items-center justify-between px-5 py-2.5 text-sm"><span>{m.label} <span className="font-mono text-xs text-slate-400">{m.code}</span></span><span className="flex items-center gap-1"><button className="btn-ghost btn-sm" onClick={() => editLabel(m)} aria-label={`Edit ${m.label}`}><Pencil className="h-4 w-4" /></button><button className="btn-ghost btn-sm" onClick={() => tog.mutate(m)}><Badge status={m.isActive ? 'ACTIVE' : 'WITHDRAWN'}>{m.isActive ? 'Active' : 'Inactive'}</Badge></button></span></li>)}</ul>
         <div className="flex gap-2 border-t border-slate-100 p-3"><input className="input" placeholder="code_like_this" value={n.code} onChange={(e) => setN({ ...n, code: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '_') })} /><input className="input" placeholder="Label" value={n.label} onChange={(e) => setN({ ...n, label: e.target.value })} /><button className="btn-secondary" disabled={!n.code || !n.label} onClick={() => add.mutate(undefined)}><Plus className="h-4 w-4" /> Add</button></div>
         <p className="px-5 pb-3 text-xs text-slate-500">Master values are deactivated rather than deleted to preserve history.</p>
       </Card>
     </div>
+  );
+}
+
+function Departments() {
+  const { data } = useGet<any>('/admin/departments');
+  const [name, setName] = useState('');
+  const add = useMut(() => api('/admin/departments', { body: { name } }), { success: 'Department added', invalidate: ['/admin'], onSuccess: () => setName('') });
+  const save = useMut(({ id, body }: any) => api(`/admin/departments/${id}`, { method: 'PATCH', body }), { success: 'Saved', invalidate: ['/admin'] });
+  const del = useDelete('Department', ['/admin']);
+  if (!data) return <PageLoader />;
+  const items = data.items ?? data;
+  return (
+    <Card title="Departments" bodyClass="p-0">
+      <ul className="divide-y divide-slate-100">{items.map((x: any) => (
+        <li key={x.id} className="flex items-center justify-between px-5 py-2.5 text-sm">
+          <span>{x.name} {x.isActive === false && <Badge status="WITHDRAWN">Inactive</Badge>}</span>
+          <span className="flex gap-1">
+            <button className="btn-ghost btn-sm" onClick={() => { const n = window.prompt('Department name', x.name); if (n && n.trim()) save.mutate({ id: x.id, body: { name: n.trim() } }); }} aria-label={`Rename ${x.name}`}><Pencil className="h-4 w-4" /></button>
+            <button className="btn-ghost btn-sm" onClick={() => save.mutate({ id: x.id, body: { isActive: x.isActive === false } })}>{x.isActive === false ? 'Activate' : 'Deactivate'}</button>
+            <button className="btn-ghost btn-sm text-rose-600" onClick={() => confirmDelete(`department "${x.name}"`) && del.mutate(`/admin/departments/${x.id}`)} aria-label={`Delete ${x.name}`}><Trash2 className="h-4 w-4" /></button>
+          </span>
+        </li>
+      ))}</ul>
+      <div className="flex gap-2 border-t border-slate-100 p-3"><input className="input" placeholder="New department name" value={name} onChange={(e) => setName(e.target.value)} /><button className="btn-secondary" disabled={name.trim().length < 2 || add.isPending} onClick={() => add.mutate(undefined)}><Plus className="h-4 w-4" /> Add</button></div>
+      <p className="px-5 pb-3 text-xs text-slate-500">A department can be deleted only while no user belongs to it.</p>
+    </Card>
   );
 }
 
@@ -174,6 +205,7 @@ export default function Settings() {
     { key: 'general' as Tab, label: 'General', show: can('settings:manage', 'masters:manage') },
     { key: 'whatsapp' as Tab, label: 'WhatsApp (Chatwoot)', show: can('settings:manage') },
     { key: 'masters' as Tab, label: 'Master data', show: can('masters:manage') },
+    { key: 'departments' as Tab, label: 'Departments', show: can('masters:manage') },
     { key: 'workflows' as Tab, label: 'Approval workflows', show: can('settings:manage') },
     { key: 'templates' as Tab, label: 'Notification templates', show: can('notifications:manage') },
   ].filter((t) => t.show);
@@ -184,6 +216,7 @@ export default function Settings() {
       {tab === 'general' && <General />}
       {tab === 'whatsapp' && <WhatsAppSettings />}
       {tab === 'masters' && <Masters />}
+      {tab === 'departments' && <Departments />}
       {tab === 'workflows' && <Workflows />}
       {tab === 'templates' && <Templates />}
     </div>

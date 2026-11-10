@@ -64,7 +64,7 @@ const MATRIX: Record<string, Exp> = {
   'GET /admin/users': USERS_R, 'POST /admin/users': USERS_W, 'PATCH /admin/users/:id': USERS_W, 'POST /admin/users/:id/reset-password': USERS_W,
   'POST /admin/users/:id/resend-activation': USERS_W, 'POST /admin/users/:id/mfa/reset': SA, 'POST /admin/users/import': USERS_W,
   'GET /admin/roles': USERS_R, 'POST /admin/roles': SA, 'PATCH /admin/roles/:id': SA, 'DELETE /admin/roles/:id': SA,
-  'GET /admin/departments': USERS_R, 'POST /admin/departments': USERS_W, 'PATCH /admin/departments/:id': USERS_W,
+  'GET /admin/departments': USERS_R, 'POST /admin/departments': USERS_W, 'PATCH /admin/departments/:id': USERS_W, 'DELETE /admin/departments/:id': USERS_W,
   'GET /admin/masters': ALL, // LOOKUP (dropdowns)
   'POST /admin/masters': USERS_W, 'PATCH /admin/masters/:id': USERS_W,
   'GET /admin/settings': USERS_W, 'PUT /admin/settings/:key': SA,
@@ -87,14 +87,14 @@ const MATRIX: Record<string, Exp> = {
   'GET /documents/pending': DOCS, 'POST /documents/:id/verify': DOCS, 'GET /documents/:id/download': DOCS,
   // ── Academics (Mgmt R, Admin R, AcadMgr CRUDA, Faculty CRU own batch) ──
   'GET /academics/courses': STAFF, 'GET /academics/courses/:id': STAFF, // LOOKUP (course pickers in CRM/finance/exams)
-  'POST /academics/courses': COURSE_W, 'PATCH /academics/courses/:id': COURSE_W, 'POST /academics/courses/:id/subjects': COURSE_W,
-  'PATCH /academics/subjects/:id': COURSE_W, 'POST /academics/subjects/:id/modules': COURSE_W, 'PATCH /academics/modules/:id': ACD_F,
+  'POST /academics/courses': COURSE_W, 'PATCH /academics/courses/:id': COURSE_W, 'DELETE /academics/courses/:id': COURSE_W, 'POST /academics/courses/:id/subjects': COURSE_W,
+  'PATCH /academics/subjects/:id': COURSE_W, 'DELETE /academics/subjects/:id': COURSE_W, 'DELETE /academics/modules/:id': COURSE_W, 'POST /academics/subjects/:id/modules': COURSE_W, 'PATCH /academics/modules/:id': ACD_F,
   'GET /academics/batches': STAFF, // LOOKUP (batch pickers)
   'GET /academics/batches/:id': ['sa', 'mgmt', 'admin', 'sales', 'finmgr', 'finstaff', 'acad', 'fac', 'exam'],
-  'POST /academics/batches': ACD_M, 'PATCH /academics/batches/:id': ACD_M,
+  'POST /academics/batches': ACD_M, 'PATCH /academics/batches/:id': ACD_M, 'DELETE /academics/batches/:id': ACD_M,
   'GET /academics/faculty': EXM_R, 'PUT /academics/faculty/:userId': ACD_M,
   'POST /academics/batches/:id/allocations': ACD_M, 'DELETE /academics/allocations/:id': ACD_M,
-  'GET /academics/timetable': ACD_R, 'POST /academics/timetable': ACD_M, 'PATCH /academics/timetable/:id': ACD_M, 'POST /academics/timetable/publish': ACD_M,
+  'GET /academics/timetable': ACD_R, 'POST /academics/timetable': ACD_M, 'PATCH /academics/timetable/:id': ACD_M, 'DELETE /academics/timetable/:id': ACD_M, 'POST /academics/timetable/publish': ACD_M,
   'GET /academics/sessions/:id/attendance': ACD_R, 'POST /academics/sessions/:id/attendance': ACD_F, 'GET /academics/batches/:id/attendance-summary': ACD_R,
   'GET /academics/materials': ACD_R, 'POST /academics/materials': ACD_F, 'DELETE /academics/materials/:id': ACD_F,
   'GET /academics/assignments': ACD_R, 'POST /academics/assignments': ACD_F, 'GET /academics/assignments/:id/submissions': ACD_F, 'PATCH /academics/submissions/:id': ACD_F,
@@ -106,8 +106,8 @@ const MATRIX: Record<string, Exp> = {
   'POST /finance/adjustments': FIN_C, 'GET /finance/adjustments': FIN_R, // SRS 22.6: request = Finance Staff/Manager
   'GET /finance/reconciliation': ['sa', 'mgmt', 'finmgr'], // FIN-13: Finance Manager; Management via audit:read
   // ── Examinations (Mgmt R, Admin R, AcadMgr R, Faculty R, ExamOfficer CRUDA) — deferred in MVP, still protected ──
-  'GET /exams/questions': EXM_R, 'POST /exams/questions': EXM_M, 'PATCH /exams/questions/:id': EXM_M, 'POST /exams/questions/import': EXM_M,
-  'GET /exams/exams': EXM_R, 'GET /exams/exams/:id': EXM_R, 'POST /exams/exams': EXM_M, 'PATCH /exams/exams/:id': EXM_M,
+  'GET /exams/questions': EXM_R, 'POST /exams/questions': EXM_M, 'PATCH /exams/questions/:id': EXM_M, 'DELETE /exams/questions/:id': EXM_M, 'POST /exams/questions/import': EXM_M,
+  'GET /exams/exams': EXM_R, 'GET /exams/exams/:id': EXM_R, 'POST /exams/exams': EXM_M, 'PATCH /exams/exams/:id': EXM_M, 'DELETE /exams/exams/:id': EXM_M,
   'PUT /exams/exams/:id/questions': EXM_M, 'POST /exams/exams/:id/assign': EXM_M, 'POST /exams/exams/:id/exception': EXM_M, 'POST /exams/exams/:id/schedule': EXM_M,
   'GET /exams/attempts/pending': EXM_M, 'GET /exams/attempts/:id': EXM_M, 'POST /exams/attempts/:id/evaluate': EXM_M, 'POST /exams/exams/:id/marks': EXM_M,
   'POST /exams/exams/:id/process': EXM_M, 'POST /exams/exams/:id/lock': EXM_M, 'POST /exams/exams/:id/publish': EXM_M,

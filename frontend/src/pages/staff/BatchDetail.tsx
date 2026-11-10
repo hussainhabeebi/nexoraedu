@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, MessageCircle, Plus, Trash2 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { useGet, useMut } from '@/lib/hooks';
+import { confirmDelete, useDelete, useGet, useMut } from '@/lib/hooks';
 import { d } from '@/lib/format';
 import { BatchModal } from './Batches';
 import { BulkWhatsAppModal } from './Leads';
@@ -16,6 +16,8 @@ export default function BatchDetail() {
   const att = useGet<any>(`/academics/batches/${id}/attendance-summary`);
   const fac = useGet<any>(can('academics:read') ? '/academics/faculty' : null);
   const [edit, setEdit] = useState(false);
+  const nav = useNavigate();
+  const delBatch = useDelete('Batch', ['/academics'], () => nav('/staff/batches'));
   const [wa, setWa] = useState(false);
   const [al, setAl] = useState({ subjectId: '', facultyId: '' });
   const add = useMut(() => api(`/academics/batches/${id}/allocations`, { body: al }), { success: 'Faculty allocated', invalidate: ['/academics'], onSuccess: () => setAl({ subjectId: '', facultyId: '' }) });
@@ -33,6 +35,7 @@ export default function BatchDetail() {
         {can('whatsapp:send') && <button className="btn-success" onClick={() => setWa(true)}><MessageCircle className="h-4 w-4" /> WhatsApp batch</button>}
         <Link to={`/staff/timetable?batchId=${b.id}`} className="btn-secondary">Timetable</Link>
         {can('academics:manage') && <button className="btn-secondary" onClick={() => setEdit(true)}>Edit</button>}
+        {can('academics:manage') && <button className="btn-secondary text-rose-600" onClick={() => confirmDelete(`batch ${b.code}`) && delBatch.mutate(`/academics/batches/${b.id}`)}><Trash2 className="h-4 w-4" /> Delete</button>}
       </>} />
       <div className="grid gap-6 lg:grid-cols-3">
         <Card title="Details"><KV cols={1} items={[['Dates', `${d(b.startDate)} – ${d(b.endDate)}`], ['Timing', b.timing], ['Mode', b.mode], ['Seats', `${b.students.length} / ${b.capacity}`]]} /></Card>

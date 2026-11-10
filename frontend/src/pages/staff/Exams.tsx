@@ -1,23 +1,32 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus } from 'lucide-react';
+import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { useBatches, useCourses, useGet, useMut } from '@/lib/hooks';
+import { confirmDelete, useBatches, useCourses, useDelete, useGet, useMut } from '@/lib/hooks';
 import { dt, label, toLocalInput } from '@/lib/format';
 import { DataTable } from '@/components/DataTable';
 import { Badge, Input, Modal, PageHeader, Select, Textarea } from '@/components/ui';
 
-function ExamModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+function ExamModal({ open, onClose, exam }: { open: boolean; onClose: () => void; exam?: any }) {
   const nav = useNavigate();
   const courses = useCourses();
-  const [f, setF] = useState<any>({ title: '', courseId: '', batchId: '', subjectId: '', type: 'MODULE_TEST', mode: 'ONLINE', startAt: toLocalInput(new Date(Date.now() + 864e5)), endAt: toLocalInput(new Date(Date.now() + 864e5 + 3 * 3600e3)), durationMin: 60, totalMarks: 50, passMarks: 20, weightage: 100, attemptLimit: 1, shuffle: true, instructions: 'Read every question carefully.\nDo not switch tabs — tab switches are logged.\nAnswers are auto-saved; the exam auto-submits when time runs out.' });
+  const [f, setF] = useState<any>(() => exam
+    ? { ...exam, batchId: exam.batchId ?? '', subjectId: exam.subjectId ?? '', startAt: toLocalInput(new Date(exam.startAt)), endAt: toLocalInput(new Date(exam.endAt)) }
+    : { title: '', courseId: '', batchId: '', subjectId: '', type: 'MODULE_TEST', mode: 'ONLINE', startAt: toLocalInput(new Date(Date.now() + 864e5)), endAt: toLocalInput(new Date(Date.now() + 864e5 + 3 * 3600e3)), durationMin: 60, totalMarks: 50, passMarks: 20, weightage: 100, attemptLimit: 1, shuffle: true, instructions: 'Read every question carefully.\nDo not switch tabs — tab switches are logged.\nAnswers are auto-saved; the exam auto-submits when time runs out.' });
   const batches = useBatches(f.courseId || undefined);
   const course = useGet<any>(f.courseId ? `/academics/courses/${f.courseId}` : null);
-  const m = useMut(() => api('/exams/exams', { body: { ...f, batchId: f.batchId || null, subjectId: f.subjectId || null, startAt: new Date(f.startAt), endAt: new Date(f.endAt) } }), { success: 'Exam created', invalidate: ['/exams'], onSuccess: (r: any) => { onClose(); nav(`/staff/exams/${r.id}`); } });
+  const m = useMut(() => {
+    const body: any = { ...f, batchId: f.batchId || null, subjectId: f.subjectId || null, startAt: new Date(f.startAt), endAt: new Date(f.endAt) };
+    if (exam) {
+      ['id', 'code', 'status', 'createdAt', 'updatedAt', '_count', 'course', 'batch', 'subject', 'resultsPublished', 'resultsLocked', 'createdById'].forEach((k) => delete body[k]);
+      return api(`/exams/exams/${exam.id}`, { method: 'PATCH', body });
+    }
+    return api('/exams/exams', { body });
+  }, { success: exam ? 'Exam updated' : 'Exam created', invalidate: ['/exams'], onSuccess: (r: any) => { onClose(); if (!exam) nav(`/staff/exams/${r.id}`); } });
   const s = (k: string) => (e: any) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
   return (
-    <Modal open={open} onClose={onClose} title="New exam" size="xl" footer={<button className="btn-primary" disabled={!f.title || !f.courseId || m.isPending} onClick={() => m.mutate(undefined)}>Create exam</button>}>
+    <Modal open={open} onClose={onClose} title={exam ? 'Edit exam' : 'New exam'} size="xl" footer={<button className="btn-primary" disabled={!f.title || !f.courseId || m.isPending} onClick={() => m.mutate(undefined)}>{exam ? 'Save' : 'Create exam'}</button>}>
       <div className="grid gap-4 sm:grid-cols-3">
         <Input className="sm:col-span-3" label="Title" required value={f.title} onChange={s('title')} />
         <Select label="Course" required value={f.courseId} onChange={(e) => setF({ ...f, courseId: e.target.value, batchId: '', subjectId: '' })} placeholder="Select" options={(courses.data?.items ?? []).map((c) => ({ value: c.id, label: c.name }))} />
@@ -44,6 +53,8 @@ export default function Exams() {
   const nav = useNavigate();
   const { data, isLoading } = useGet<any>('/exams/exams');
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<any>(null);
+  const del = useDelete('Exam', ['/exams']);
   return (
     <div>
       <PageHeader title="Exams" actions={can('exams:manage') && <button className="btn-primary" onClick={() => setOpen(true)}><Plus className="h-4 w-4" /> New exam</button>} />
@@ -55,8 +66,15 @@ export default function Exams() {
           { key: 'a', header: 'Assigned', cell: (r: any) => r._count.assignments },
           { key: 'att', header: 'Attempts', cell: (r: any) => r._count.attempts },
           { key: 'status', header: 'Status', cell: (r: any) => <><Badge status={r.status} /> {r.resultsPublished && <Badge status="APPROVED">Published</Badge>}</> },
+          ...(can('exams:manage') ? [{ key: 'actions', header: '', cell: (r: any) => (
+            <span className="flex justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+              {r._count.attempts === 0 && <button className="btn-ghost btn-sm" onClick={() => setEditing(r)} aria-label={`Edit exam ${r.title}`}><Pencil className="h-4 w-4" /></button>}
+              {r._count.attempts === 0 && r._count.assignments === 0 && <button className="btn-ghost btn-sm text-rose-600" onClick={() => confirmDelete(`exam "${r.title}"`) && del.mutate(`/exams/exams/${r.id}`)} aria-label={`Delete exam ${r.title}`}><Trash2 className="h-4 w-4" /></button>}
+            </span>
+          ) }] : []),
         ]} />
       {open && <ExamModal open onClose={() => setOpen(false)} />}
+      {editing && <ExamModal open onClose={() => setEditing(null)} exam={editing} />}
     </div>
   );
 }
