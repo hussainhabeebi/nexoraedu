@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { Prisma } from '#prisma';
 import { prisma } from '../lib/prisma';
 import { ah, badRequest, conflict, forbidden, paging } from '../lib/http';
-import { bumpAuthVersion, can, isSuperAdmin, revokeUserSessions } from '../lib/auth';
+import { bumpAuthVersion, can, isSuperAdmin, revokeUserSessions, clearAuthCache } from '../lib/auth';
 import { audit, securityEvent } from '../lib/audit';
 import { PERMISSIONS, isKnownPermission, isPrivilegedRole } from '../lib/permissions';
 import { DEFAULT_SETTINGS, getSettings, invalidateSettings } from '../lib/settings';
@@ -339,7 +339,9 @@ r.put('/settings/:key', can('settings:manage'), ah(async (req, res) => {
   // Changing the zone affects NEW fee plans only; existing plans keep their stored due dates and recorded zone.
   if (key === 'security') {
     // Security floors from the SRS cannot be weakened from the UI (SEC-01, SEC-04, SEC-05).
-    const sec = z.object({ sessionTimeoutMin: z.number().int().min(5).max(240), passwordMinLength: z.number().int().min(MIN_LENGTH_FLOOR).max(64), maxFailedLogins: z.number().int().min(3).max(10), lockMinutes: z.number().int().min(5).max(1440), activationHours: z.number().int().min(1).max(168) }).parse(value);
+    const sec = z.object({ sessionTimeoutMin: z.number().int().min(5).max(240), passwordMinLength: z.number().int().min(MIN_LENGTH_FLOOR).max(64), maxFailedLogins: z.number().int().min(3).max(10), lockMinutes: z.number().int().min(5).max(1440), activationHours: z.number().int().min(1).max(168), mfaRequired: z.boolean().default(false) }).parse(value);
+    // Turning the sign-in authenticator code on or off is a Super Administrator decision (audit-logged below).
+    if (sec.mfaRequired !== (before as any).mfaRequired && !req.user!.roles.includes('super_admin')) throw forbidden('Only a Super Administrator can change the authenticator-code requirement.');
     Object.assign(value, sec);
   }
   await atomic(async (tx) => {
@@ -347,6 +349,7 @@ r.put('/settings/:key', can('settings:manage'), ah(async (req, res) => {
     await audit(tx, req, 'UPDATE', 'setting', key, before, value);
   });
   invalidateSettings();
+  if (key === 'security') clearAuthCache();
   res.json(value);
 }));
 
