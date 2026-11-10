@@ -53,7 +53,7 @@ export class ReissueRefused extends Error {
 }
 
 /**
- * Staging only: a fresh single-use activation link for the bootstrapped Super Administrator when the first link
+ * A fresh single-use activation link for the bootstrapped Super Administrator when the first link
  * was lost or expired. Never creates a user and never changes the password, roles, MFA or sessions.
  * Allowed only while the account has never been activated: no password set, never signed in, no MFA, and no
  * activation link ever used. Every unused activation link is invalidated (expired at once); only the new token's SHA-256 hash

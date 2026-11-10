@@ -13,7 +13,7 @@ const E: [string, string, string, string][] = [
   ['post', '/admin/users/{id}/mfa/reset', 'Admin', 'Reset a user’s MFA (Super Administrator only)'],
   ['get', '/auth/me', 'Auth', 'Current user, roles & permissions'],
   ['post', '/auth/bootstrap', 'Auth', 'First Super Administrator (header X-Bootstrap-Token; only while BOOTSTRAP_TOKEN is set) → single-use activation link'],
-  ['post', '/auth/bootstrap/reissue-activation', 'Auth', 'Staging only: fresh activation link for the never-activated bootstrapped Super Admin (X-Bootstrap-Token + username + email)'],
+  ['post', '/auth/bootstrap/reissue-activation', 'Auth', 'Fresh activation link for the never-activated bootstrapped Super Admin (X-Bootstrap-Token + username + email)'],
   ['post', '/auth/change-password', 'Auth', 'Change password'],
   ['post', '/auth/forgot-password', 'Auth', 'Send reset link (email / WhatsApp)'],
   ['post', '/auth/reset-password', 'Auth', 'Reset password with token'],

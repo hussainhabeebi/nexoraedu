@@ -1,5 +1,5 @@
 /**
- * Staging-only re-issue of the bootstrapped Super Administrator's activation link
+ * Re-issue of the bootstrapped Super Administrator's activation link (staging and production, token-gated)
  * (POST /api/v1/auth/bootstrap/reissue-activation). Synthetic accounts only.
  */
 import { afterAll, describe, expect, it } from 'vitest';
@@ -60,15 +60,21 @@ describe('authorisation', () => {
     }
   });
 
-  it('does not exist in production, even with a valid token', async () => {
-    const { body, u } = await pendingSuperAdmin();
+  it('works in production too, but only with the token, and only for a never-activated Super Admin', async () => {
+    const { body, u, original } = await pendingSuperAdmin();
     config.appEnv = 'production';
     try {
-      expect((await reissue(body)).status).toBe(404);
+      expect((await reissue(body, null)).status).toBe(404); // no token: hidden
+      const r = await reissue(body);
+      expect(r.status, JSON.stringify(r.body)).toBe(201);
+      expect(new URL(r.body.activationLink).pathname).toBe('/reset-password');
+      expect((await activate(original)).status).toBe(400); // old link invalidated
+      expect((await activate(tokenOf(r.body.activationLink))).status).toBe(200);
+      expect((await reissue(body)).status).toBe(409); // activated: refused
     } finally {
       config.appEnv = saved.appEnv;
     }
-    expect(await prisma.passwordReset.count({ where: { userId: u.id } })).toBe(1); // nothing issued
+    expect(await prisma.auditLog.count({ where: { action: 'BOOTSTRAP_ACTIVATION_REISSUED', entityId: u.id } })).toBe(1);
   });
 });
 

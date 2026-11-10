@@ -397,12 +397,12 @@ r.post('/bootstrap', limiter, ah(async (req, res) => {
 }));
 
 /**
- * STAGING ONLY: re-issue the activation link of the bootstrapped Super Administrator (lost or expired first link).
+ * Re-issue the activation link of the bootstrapped Super Administrator (lost or expired first link). Available in
+ * every environment, but only while BOOTSTRAP_TOKEN is set (owner decision 2026-11-10: the production link was lost).
  * Needs X-Bootstrap-Token and the account's username + email; refused (409) once the account has been activated.
- * Not available in production (404 even with a token). See services/bootstrap.ts reissueActivation().
+ * See services/bootstrap.ts reissueActivation().
  */
 r.post('/bootstrap/reissue-activation', limiter, ah(async (req, res) => {
-  if (!['staging', 'development', 'test'].includes(config.appEnv)) throw new HttpError(404, 'Not found', 'NOT_FOUND');
   assertBootstrapToken(req);
   try {
     const out = await reissueActivation(prisma as any, req.body ?? {}, config.publicAppUrl, { ip: req.ip, userAgent: req.get('user-agent'), requestId: req.id });
