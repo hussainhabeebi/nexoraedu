@@ -11,6 +11,7 @@ import { reconcile } from '../src/services/reconciliation';
 import { nextNumber } from '../src/lib/sequence';
 import { invalidateSettings } from '../src/lib/settings';
 import { runFeeReminders } from '../src/jobs/scheduler';
+import { processReminderQueue } from '../src/services/feeReminders';
 import { atomic } from '../src/lib/db';
 
 const c = (s: string) => parseIsoDate(s)!;
@@ -186,12 +187,14 @@ describe('Fee plans in the database', () => {
     const today = toCalendarDate(new Date(), tz);
     const st = await makeStudent({});
     await atomic((tx) => createFeePlan(tx, { studentId: st.id, courseId: st.courseId, installments: 1, startDate: isoDate(today) }));
-    await runFeeReminders();
+    await runFeeReminders({ ignoreHours: true });
+    // The queue delivers in bounded batches; deliver this student's reminders now.
+    await processReminderQueue({ ids: (await prisma.feeReminder.findMany({ where: { studentId: st.id } })).map((r) => r.id) });
     const logs = await prisma.notificationLog.findMany({ where: { recipient: st.email } });
     expect(logs.map((l) => l.templateKey)).toContain('fee.reminder_upcoming');
     expect(logs.map((l) => l.templateKey)).not.toContain('fee.reminder_overdue');
     const n = logs.length;
-    await runFeeReminders();
+    await runFeeReminders({ ignoreHours: true });
     expect(await prisma.notificationLog.count({ where: { recipient: st.email } })).toBe(n);
   });
 

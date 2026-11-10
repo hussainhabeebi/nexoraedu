@@ -1,19 +1,20 @@
 /** Finance (SRS §12). Ledger is immutable — corrections are reversing entries only. */
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import PDFDocument from '../lib/pdf';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
-import { ah, badRequest, notFound, paging } from '../lib/http';
+import { ah, badRequest, forbidden, notFound, paging } from '../lib/http';
 import { can, userCan } from '../lib/auth';
 import { audit } from '../lib/audit';
 import { getSettings } from '../lib/settings';
 import { money, toCsv } from '../lib/util';
-import { dayDiff, formatDate, toCalendarDate } from '../lib/caldate';
+import { dayDiff, endOfDayUtc, formatDate, toCalendarDate } from '../lib/caldate';
 import { reconcile } from '../services/reconciliation';
 import { createApproval } from '../services/approvals';
-import { ACTIVE_REFUND_STATUSES, assertCancellationKeepsRefundsCovered, courseFee, createFeePlan, ledger, lockStudentAccount, recordPayment, studentBalance } from '../services/finance';
+import { ACTIVE_REFUND_STATUSES, assertCancellationKeepsRefundsCovered, courseFee, createFeePlan, installmentFeeMonth, ledger, lockStudentAccount, recordPayment, studentBalance } from '../services/finance';
 import { earlierPlansForCourse, feeEnrollmentChain, requestFeeAdjustment, requestRebill } from '../services/feeAdjustments';
 import { notifyLater } from '../services/notify';
+import { enqueueManualReminders, mask, processReminderQueue, runFeeReminders } from '../services/feeReminders';
 import { atomic } from '../lib/db';
 import { dbDate } from '../lib/db';
 
@@ -326,10 +327,84 @@ r.get('/collections', can('finance:read'), ah(async (req, res) => {
   });
 }));
 
-// FIN-08 manual reminder run (also scheduled in jobs)
-r.post('/reminders/run', can('finance:collect'), ah(async (_req, res) => {
-  const { runFeeReminders } = await import('../jobs/scheduler');
-  res.json({ sent: await runFeeReminders(true) });
+// ── FIN-08 fee reminders (services/feeReminders.ts) ──
+
+/**
+ * Collection scope: Finance Managers (finance:manage) and Super Admins work on every student; other finance users
+ * (Finance Staff) send reminders and see follow-ups only for students assigned to them (students.financeOwnerId).
+ */
+export const collectionScope = (req: Request) => (userCan(req, 'finance:manage') ? {} : { financeOwnerId: req.user!.id });
+
+// Run the automatic schedule now (normally the cron does this through the day).
+r.post('/reminders/run', can('finance:manage'), ah(async (req, res) => {
+  const out = await runFeeReminders({ ignoreHours: true });
+  await audit(prisma, req, 'REMINDER_RUN', 'fee_reminder', null, null, out);
+  res.json(out);
+}));
+
+// Individual or bulk reminders: the given students (in scope), or every in-scope student with an overdue installment.
+r.post('/reminders/send', can('finance:collect'), ah(async (req, res) => {
+  const b = z.object({ studentIds: z.array(z.string()).min(1).max(200).optional(), overdueOnly: z.boolean().optional() }).refine((x) => x.studentIds || x.overdueOnly, 'Choose students, or overdueOnly').parse(req.body);
+  const scope = collectionScope(req);
+  let ids: string[];
+  if (b.studentIds) {
+    const ok = await prisma.student.findMany({ where: { id: { in: b.studentIds }, ...scope }, select: { id: true } });
+    if (ok.length !== new Set(b.studentIds).size) throw forbidden('You can send reminders only to students assigned to you.');
+    ids = ok.map((x) => x.id);
+  } else {
+    const s = await getSettings();
+    const today = toCalendarDate(new Date(), s.academy.timeZone);
+    const overdue = await prisma.installment.findMany({
+      where: { status: { in: ['DUE', 'PARTIAL'] }, dueDate: { lt: endOfDayUtc({ ...today }, s.academy.timeZone) }, feePlan: { student: { ...scope, status: { notIn: ['WITHDRAWN', 'TERMINATED', 'COMPLETED'] } } } },
+      select: { dueDate: true, feePlan: { select: { studentId: true } } },
+    });
+    ids = [...new Set(overdue.filter((i) => dayDiff(toCalendarDate(i.dueDate, s.academy.timeZone), today) > 0).map((i) => i.feePlan.studentId))].slice(0, 500);
+  }
+  const q = await enqueueManualReminders(ids, req.user!.id);
+  const queuedIds = (await prisma.feeReminder.findMany({ where: { studentId: { in: ids }, trigger: 'MANUAL', status: 'QUEUED', sentById: req.user!.id }, select: { id: true }, take: 50 })).map((x) => x.id);
+  const d = await processReminderQueue({ ids: queuedIds, limit: 50 });
+  const out = { students: ids.length, ...q, ...d, pending: Math.max(0, q.queued - d.sent - d.failed - d.skipped) };
+  await audit(prisma, req, 'REMINDER_SEND', 'fee_reminder', null, null, { studentIds: ids.length <= 20 ? ids : undefined, ...out });
+  res.json(out);
+}));
+
+// Reminder history and delivery status (addresses masked).
+r.get('/reminders', can('finance:read'), ah(async (req, res) => {
+  const { skip, take, page, pageSize } = paging(req.query);
+  const where: any = {};
+  if (req.query.studentId) where.studentId = String(req.query.studentId);
+  if (req.query.status) where.status = String(req.query.status);
+  if (req.query.channel) where.channel = String(req.query.channel);
+  if (req.query.trigger) where.trigger = String(req.query.trigger);
+  const [rows, total] = await Promise.all([
+    prisma.feeReminder.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take, include: { installment: { select: { seq: true, dueDate: true, feeMonth: true } } } }),
+    prisma.feeReminder.count({ where }),
+  ]);
+  const students = await prisma.student.findMany({ where: { id: { in: [...new Set(rows.map((x) => x.studentId))] } }, select: { id: true, fullName: true, studentCode: true } });
+  const guardians = await prisma.guardian.findMany({ where: { id: { in: rows.filter((x) => x.recipientType === 'GUARDIAN').map((x) => x.recipientRef) } }, select: { id: true, name: true, relation: true } });
+  const tz = (await getSettings()).academy.timeZone;
+  res.json({
+    page, pageSize, total,
+    items: rows.map(({ address, installment, ...x }) => ({
+      ...x, address: mask(x.channel, address), student: students.find((s) => s.id === x.studentId) ?? null,
+      recipient: x.recipientType === 'GUARDIAN' ? (guardians.find((g) => g.id === x.recipientRef) ?? { name: 'Guardian (removed)' }) : { name: 'Student' },
+      installment: { seq: installment.seq, dueDate: installment.dueDate, feeMonth: installmentFeeMonth(installment, tz) },
+    })),
+  });
+}));
+
+// Retry a reminder that failed (including one that used up its automatic attempts).
+r.post('/reminders/:id/retry', can('finance:collect'), ah(async (req, res) => {
+  const row = await prisma.feeReminder.findUnique({ where: { id: req.params.id } });
+  if (!row) throw notFound('Reminder not found');
+  if (!(await prisma.student.count({ where: { id: row.studentId, ...collectionScope(req) } }))) throw forbidden('You can retry reminders only for students assigned to you.');
+  if (row.status !== 'FAILED') throw badRequest(`Only failed reminders can be retried (this one is ${row.status.toLowerCase()}).`);
+  const max = (await getSettings()).finance.reminderMaxAttempts;
+  const reset = await prisma.feeReminder.updateMany({ where: { id: row.id, status: 'FAILED', attempts: row.attempts }, data: { attempts: Math.min(row.attempts, max - 1), nextAttemptAt: new Date() } });
+  if (reset.count !== 1) throw badRequest('This reminder changed meanwhile; refresh and try again.');
+  const d = await processReminderQueue({ ids: [row.id], limit: 1 });
+  await audit(prisma, req, 'REMINDER_RETRY', 'fee_reminder', row.id, { status: row.status, attempts: row.attempts }, d);
+  res.json({ ...d, reminder: await prisma.feeReminder.findUnique({ where: { id: row.id }, select: { id: true, status: true, attempts: true, lastError: true, sentAt: true } }) });
 }));
 
 // FIN-13 / RPT-06 reconciliation: read-only consistency check (never modifies records).

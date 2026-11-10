@@ -2,41 +2,14 @@
 import { prisma } from '../lib/prisma';
 import { purgeExpiredRateLimits } from '../lib/rate-store';
 import { getSettings } from '../lib/settings';
-import { money } from '../lib/util';
-import { dayDiff, formatDate, toCalendarDate, zonedTimeToUtc } from '../lib/caldate';
-import { notify, notifyRole, notifyUser } from '../services/notify';
+import { notifyRole, notifyUser } from '../services/notify';
+import { runFeeReminders } from '../services/feeReminders';
 import { finalizeAttempt } from '../routes/portal';
 
 const DAY = 864e5;
 
-/** FIN-08: reminders N days before / after due date (once per day per installment). */
-export async function runFeeReminders(force = false) {
-  const s = await getSettings();
-  // Reminder offsets are whole CALENDAR days in the academy zone (not server-local hours).
-  const tz = s.academy.timeZone;
-  const todayCal = toCalendarDate(new Date(), tz);
-  const today = zonedTimeToUtc(todayCal, tz); // start of today in the academy zone (once-per-day guard)
-  const offsets = [...s.finance.reminderDaysBefore.map((d) => -d), 0, ...s.finance.reminderDaysAfter];
-  const insts = await prisma.installment.findMany({
-    where: { status: { in: ['DUE', 'PARTIAL'] }, dueDate: { gte: new Date(today.getTime() - 120 * DAY), lte: new Date(today.getTime() + 30 * DAY) }, ...(force ? {} : { OR: [{ lastReminderAt: null }, { lastReminderAt: { lt: today } }] }) },
-    include: { feePlan: { include: { student: { include: { lead: true } } } } },
-  });
-  let sent = 0;
-  for (const i of insts) {
-    const st = i.feePlan.student;
-    if (['WITHDRAWN', 'TERMINATED', 'COMPLETED'].includes(st.status)) continue;
-    const diff = dayDiff(toCalendarDate(i.dueDate, tz), todayCal); // >0 overdue, <0 upcoming
-    if (!force && !offsets.includes(diff)) continue;
-    if (force && diff < -Math.max(...s.finance.reminderDaysBefore, 0)) continue;
-    const key = diff <= 0 ? 'fee.reminder_upcoming' : 'fee.reminder_overdue'; // due today is not yet overdue
-    await notify(key, { userId: st.userId, name: st.fullName, email: st.email, phone: st.phone, conversationId: st.lead?.chatwootConversationId }, {
-      name: st.fullName, amount: money(Number(i.amount) - Number(i.paidAmount)).toFixed(2), dueDate: formatDate(i.dueDate, tz), installment: i.seq, days: Math.abs(diff),
-    });
-    await prisma.installment.update({ where: { id: i.id }, data: { lastReminderAt: new Date() } });
-    sent++;
-  }
-  return sent;
-}
+/** FIN-08 fee reminders: see services/feeReminders.ts (stages, guardians, de-duplication, retries). */
+export { runFeeReminders };
 
 /** CRM-08 reminders for due follow-ups (15 min ahead) + CRM-09 inactivity alert to Sales Manager. */
 export async function runCrmReminders() {
@@ -92,7 +65,11 @@ export async function runScheduled(cron: string, _at: Date = new Date()) {
     }
   };
   if (cron === '* * * * *') await safe('exam', runExamSweeper);
-  else if (cron === '*/5 * * * *') await safe('crm', runCrmReminders);
+  else if (cron === '*/5 * * * *') {
+    await safe('crm', runCrmReminders);
+    // Fee reminders continue in small batches through the day (bounded work per run), and failed ones are retried.
+    await safe('fees', () => runFeeReminders());
+  }
   else if (cron === '30 3 * * *') {
     await safe('fees', () => runFeeReminders());
     await safe('digest', runDailyDigest);
