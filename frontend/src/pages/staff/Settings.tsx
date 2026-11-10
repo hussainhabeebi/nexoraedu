@@ -1,14 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { CheckCircle2, Copy, Plus, Trash2, XCircle } from 'lucide-react';
+import { CheckCircle2, Copy, Pencil, Plus, Trash2, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { useGet, useMut } from '@/lib/hooks';
+import { confirmDelete, useDelete, useGet, useMut } from '@/lib/hooks';
 import { label } from '@/lib/format';
 import { Badge, Card, Input, Modal, PageHeader, PageLoader, Select, Spinner, Tabs, Textarea } from '@/components/ui';
 
-type Tab = 'general' | 'whatsapp' | 'masters' | 'workflows' | 'templates';
+type Tab = 'general' | 'whatsapp' | 'masters' | 'departments' | 'workflows' | 'templates';
 
 function WhatsAppSettings() {
   const { data, isLoading } = useGet<any>('/whatsapp/config');
@@ -54,7 +54,7 @@ function WhatsAppSettings() {
 
 function General() {
   const { data, isLoading } = useGet<any>('/admin/settings');
-  const { can } = useAuth();
+  const { can, hasRole } = useAuth();
   const [f, setF] = useState<any>(null);
   useEffect(() => { if (data) setF(structuredClone(data)); }, [data]);
   const save = useMut((key: string) => api(`/admin/settings/${key}`, { method: 'PUT', body: f[key] }), { success: 'Settings saved', invalidate: ['/admin', 'site'] });
@@ -65,7 +65,7 @@ function General() {
   const groups: [string, string, JSX.Element][] = [
     ['academy', 'Academy profile', <div className="grid gap-4 sm:grid-cols-2">{field('academy', 'name', 'Academy name')}{field('academy', 'tagline', 'Tagline')}{field('academy', 'email', 'Email')}{field('academy', 'phone', 'Phone')}{field('academy', 'whatsapp', 'WhatsApp number (website button)')}{field('academy', 'logoUrl', 'Logo URL')}<div className="sm:col-span-2">{field('academy', 'address', 'Address')}</div></div>],
     ['ids', 'ID & numbering formats', <div className="grid gap-4 sm:grid-cols-2">{['student', 'lead', 'application', 'invoice', 'receipt', 'certificate'].map((k) => <div key={k}>{field('ids', k, label(k), 'text', 'Tokens: {YYYY} {YY} {MM} and #### for the counter')}</div>)}</div>],
-    ['security', 'Security policy', <div className="grid gap-4 sm:grid-cols-2">{field('security', 'sessionTimeoutMin', 'Session timeout (min)', 'number')}{field('security', 'passwordMinLength', 'Minimum password length', 'number')}{field('security', 'maxFailedLogins', 'Lock after failed logins', 'number')}{field('security', 'lockMinutes', 'Lock duration (min)', 'number')}</div>],
+    ['security', 'Security policy', <div className="grid gap-4 sm:grid-cols-2">{field('security', 'sessionTimeoutMin', 'Session timeout (min)', 'number')}{field('security', 'passwordMinLength', 'Minimum password length', 'number')}{field('security', 'maxFailedLogins', 'Lock after failed logins', 'number')}{field('security', 'lockMinutes', 'Lock duration (min)', 'number')}<label className="flex items-start gap-2 text-sm sm:col-span-2"><input type="checkbox" className="mt-0.5 rounded text-brand-600" checked={!!f.security.mfaRequired} disabled={!hasRole('super_admin')} onChange={(e) => setF({ ...f, security: { ...f.security, mfaRequired: e.target.checked } })} /><span><b>Require authenticator code at sign-in</b> for administrative and finance roles. When off, staff sign in with their password only. Only a Super Administrator can change this.</span></label></div>],
     ['crm', 'CRM', <div className="grid gap-4 sm:grid-cols-2"><Select label="Lead assignment" value={f.crm.autoAssign} onChange={(e) => setF({ ...f, crm: { ...f.crm, autoAssign: e.target.value } })} options={[{ value: 'round_robin', label: 'Automatic (least-loaded counselor)' }, { value: 'manual', label: 'Manual by Sales Manager' }]} />{field('crm', 'inactivityDays', 'Alert after inactive days', 'number')}</div>],
     ['finance', 'Finance', <div className="grid gap-4 sm:grid-cols-2">{field('finance', 'discountApprovalLimit', 'Discount self-approval limit (₹)', 'number')}{field('finance', 'monthlyTarget', 'Monthly collection target (₹)', 'number')}<Input label="Reminder days before due" value={f.finance.reminderDaysBefore.join(',')} onChange={(e) => setF({ ...f, finance: { ...f.finance, reminderDaysBefore: e.target.value.split(',').map(Number).filter((n) => !isNaN(n)) } })} hint="Comma separated, e.g. 3,1" /><Input label="Reminder days after due" value={f.finance.reminderDaysAfter.join(',')} onChange={(e) => setF({ ...f, finance: { ...f.finance, reminderDaysAfter: e.target.value.split(',').map(Number).filter((n) => !isNaN(n)) } })} /></div>],
     ['academics', 'Academics', <div className="grid gap-4 sm:grid-cols-2">{field('academics', 'attendanceThreshold', 'Attendance alert threshold (%)', 'number')}{field('academics', 'attendanceEditWindowHours', 'Attendance edit window (hours)', 'number')}</div>],
@@ -80,16 +80,47 @@ function Masters() {
   const [n, setN] = useState({ code: '', label: '' });
   const add = useMut(() => api('/admin/masters', { body: { type, ...n } }), { success: 'Added', invalidate: ['/admin'], onSuccess: () => setN({ code: '', label: '' }) });
   const tog = useMut((m: any) => api(`/admin/masters/${m.id}`, { method: 'PATCH', body: { isActive: !m.isActive } }), { invalidate: ['/admin'] });
+  const relabel = useMut(({ id, label: l }: any) => api(`/admin/masters/${id}`, { method: 'PATCH', body: { label: l } }), { success: 'Saved', invalidate: ['/admin'] });
+  const editLabel = (m: any) => {
+    const l = window.prompt('Label', m.label);
+    if (l && l.trim() && l.trim() !== m.label) relabel.mutate({ id: m.id, label: l.trim() });
+  };
   if (!data) return <PageLoader />;
   return (
     <div className="grid gap-6 lg:grid-cols-[220px_1fr]">
       <Card bodyClass="p-2" className="h-fit"><ul>{data.types.map((t: string) => <li key={t}><button className={`w-full rounded-lg px-3 py-2 text-left text-sm ${type === t ? 'bg-brand-50 font-medium text-brand-700' : 'hover:bg-slate-50'}`} onClick={() => setType(t)}>{label(t)}</button></li>)}</ul></Card>
       <Card title={label(type)} bodyClass="p-0">
-        <ul className="divide-y divide-slate-100">{data.items.filter((m: any) => m.type === type).map((m: any) => <li key={m.id} className="flex items-center justify-between px-5 py-2.5 text-sm"><span>{m.label} <span className="font-mono text-xs text-slate-400">{m.code}</span></span><button className="btn-ghost btn-sm" onClick={() => tog.mutate(m)}><Badge status={m.isActive ? 'ACTIVE' : 'WITHDRAWN'}>{m.isActive ? 'Active' : 'Inactive'}</Badge></button></li>)}</ul>
+        <ul className="divide-y divide-slate-100">{data.items.filter((m: any) => m.type === type).map((m: any) => <li key={m.id} className="flex items-center justify-between px-5 py-2.5 text-sm"><span>{m.label} <span className="font-mono text-xs text-slate-400">{m.code}</span></span><span className="flex items-center gap-1"><button className="btn-ghost btn-sm" onClick={() => editLabel(m)} aria-label={`Edit ${m.label}`}><Pencil className="h-4 w-4" /></button><button className="btn-ghost btn-sm" onClick={() => tog.mutate(m)}><Badge status={m.isActive ? 'ACTIVE' : 'WITHDRAWN'}>{m.isActive ? 'Active' : 'Inactive'}</Badge></button></span></li>)}</ul>
         <div className="flex gap-2 border-t border-slate-100 p-3"><input className="input" placeholder="code_like_this" value={n.code} onChange={(e) => setN({ ...n, code: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '_') })} /><input className="input" placeholder="Label" value={n.label} onChange={(e) => setN({ ...n, label: e.target.value })} /><button className="btn-secondary" disabled={!n.code || !n.label} onClick={() => add.mutate(undefined)}><Plus className="h-4 w-4" /> Add</button></div>
         <p className="px-5 pb-3 text-xs text-slate-500">Master values are deactivated rather than deleted to preserve history.</p>
       </Card>
     </div>
+  );
+}
+
+function Departments() {
+  const { data } = useGet<any>('/admin/departments');
+  const [name, setName] = useState('');
+  const add = useMut(() => api('/admin/departments', { body: { name } }), { success: 'Department added', invalidate: ['/admin'], onSuccess: () => setName('') });
+  const save = useMut(({ id, body }: any) => api(`/admin/departments/${id}`, { method: 'PATCH', body }), { success: 'Saved', invalidate: ['/admin'] });
+  const del = useDelete('Department', ['/admin']);
+  if (!data) return <PageLoader />;
+  const items = data.items ?? data;
+  return (
+    <Card title="Departments" bodyClass="p-0">
+      <ul className="divide-y divide-slate-100">{items.map((x: any) => (
+        <li key={x.id} className="flex items-center justify-between px-5 py-2.5 text-sm">
+          <span>{x.name} {x.isActive === false && <Badge status="WITHDRAWN">Inactive</Badge>}</span>
+          <span className="flex gap-1">
+            <button className="btn-ghost btn-sm" onClick={() => { const n = window.prompt('Department name', x.name); if (n && n.trim()) save.mutate({ id: x.id, body: { name: n.trim() } }); }} aria-label={`Rename ${x.name}`}><Pencil className="h-4 w-4" /></button>
+            <button className="btn-ghost btn-sm" onClick={() => save.mutate({ id: x.id, body: { isActive: x.isActive === false } })}>{x.isActive === false ? 'Activate' : 'Deactivate'}</button>
+            <button className="btn-ghost btn-sm text-rose-600" onClick={() => confirmDelete(`department "${x.name}"`) && del.mutate(`/admin/departments/${x.id}`)} aria-label={`Delete ${x.name}`}><Trash2 className="h-4 w-4" /></button>
+          </span>
+        </li>
+      ))}</ul>
+      <div className="flex gap-2 border-t border-slate-100 p-3"><input className="input" placeholder="New department name" value={name} onChange={(e) => setName(e.target.value)} /><button className="btn-secondary" disabled={name.trim().length < 2 || add.isPending} onClick={() => add.mutate(undefined)}><Plus className="h-4 w-4" /> Add</button></div>
+      <p className="px-5 pb-3 text-xs text-slate-500">A department can be deleted only while no user belongs to it.</p>
+    </Card>
   );
 }
 
@@ -174,6 +205,7 @@ export default function Settings() {
     { key: 'general' as Tab, label: 'General', show: can('settings:manage', 'masters:manage') },
     { key: 'whatsapp' as Tab, label: 'WhatsApp (Chatwoot)', show: can('settings:manage') },
     { key: 'masters' as Tab, label: 'Master data', show: can('masters:manage') },
+    { key: 'departments' as Tab, label: 'Departments', show: can('masters:manage') },
     { key: 'workflows' as Tab, label: 'Approval workflows', show: can('settings:manage') },
     { key: 'templates' as Tab, label: 'Notification templates', show: can('notifications:manage') },
   ].filter((t) => t.show);
@@ -184,6 +216,7 @@ export default function Settings() {
       {tab === 'general' && <General />}
       {tab === 'whatsapp' && <WhatsAppSettings />}
       {tab === 'masters' && <Masters />}
+      {tab === 'departments' && <Departments />}
       {tab === 'workflows' && <Workflows />}
       {tab === 'templates' && <Templates />}
     </div>

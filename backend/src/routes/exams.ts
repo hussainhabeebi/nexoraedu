@@ -17,6 +17,7 @@ import { notifyLater } from '../services/notify';
 import { studentBalance } from '../services/finance';
 import { studentAttendancePct } from './academics';
 import { atomic, type Tx } from '../lib/db';
+import { DELETE_SPECS, deleteIfUnused } from '../services/setupDelete';
 
 const r = Router();
 
@@ -389,4 +390,9 @@ r.get('/certificates/:id/pdf', can('exams:read'), ah(async (req, res) => {
 }));
 
 export { autoGrade };
+
+// ── Delete question-bank items and draft exams: only while unused (services/setupDelete.ts) ──
+r.delete('/questions/:id', can('exams:manage'), ah(async (req, res) => res.json(await deleteIfUnused(DELETE_SPECS.question, req.params.id, req))));
+r.delete('/exams/:id', can('exams:manage'), ah(async (req, res) => res.json(await deleteIfUnused(DELETE_SPECS.exam, req.params.id, req))));
+
 export default r;

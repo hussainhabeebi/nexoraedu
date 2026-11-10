@@ -20,6 +20,16 @@ export function useMut<V = any, R = any>(fn: (v: V) => Promise<R>, o: { success?
   });
 }
 
+/**
+ * Delete a setup item. The server refuses (with the reason and the alternative, shown as a toast) when the item
+ * is in use, so nothing is ever removed that other records depend on.
+ */
+export function useDelete(label: string, invalidate: string[], onSuccess?: () => void) {
+  return useMut((path: string) => api(path, { method: 'DELETE' }), { success: `${label} deleted`, invalidate, onSuccess });
+}
+export const confirmDelete = (what: string) =>
+  window.confirm(`Delete ${what}? This cannot be undone.\n\nIf it is still in use, nothing is deleted and you will be told why.`);
+
 export const useCourses = () => useGet<{ items: any[] }>('/academics/courses', { staleTime: 60_000 });
 export const useBatches = (courseId?: string) => useGet<{ items: any[] }>(`/academics/batches${courseId ? `?courseId=${courseId}` : ''}`, { staleTime: 60_000 });
 export const useMasters = (type?: string) => useGet<{ items: { id: string; type: string; code: string; label: string; isActive: boolean; meta?: any }[]; types: string[] }>(`/admin/masters${type ? `?type=${type}` : ''}`, { staleTime: 5 * 60_000 });

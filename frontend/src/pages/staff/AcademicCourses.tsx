@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Plus, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { useGet, useMut } from '@/lib/hooks';
+import { confirmDelete, useDelete, useGet, useMut } from '@/lib/hooks';
 import { inr } from '@/lib/format';
 import { Badge, Card, Empty, Input, Modal, PageHeader, PageLoader, Select, Textarea } from '@/components/ui';
 
@@ -59,14 +59,36 @@ function Curriculum({ courseId }: { courseId: string }) {
   const addS = useMut(() => api(`/academics/courses/${courseId}/subjects`, { body: { code: s.code, name: s.name, hours: Number(s.hours) || 0, sequence: (data?.subjects.length ?? 0) + 1 } }), { success: 'Subject added', invalidate: ['/academics'], onSuccess: () => setS({ code: '', name: '', hours: '' }) });
   const addM = useMut((sid: string) => api(`/academics/subjects/${sid}/modules`, { body: { name: mod[sid], sequence: 99 } }), { invalidate: ['/academics'], onSuccess: () => setMod({}) });
   const toggle = useMut(({ id, completed }: any) => api(`/academics/modules/${id}`, { method: 'PATCH', body: { completed } }), { invalidate: ['/academics'] });
+  const rename = useMut(({ path, body }: any) => api(path, { method: 'PATCH', body }), { success: 'Saved', invalidate: ['/academics'] });
+  const del = useDelete('Item', ['/academics']);
+  const editSubject = (x: any) => {
+    const name = window.prompt('Subject name', x.name);
+    if (name === null || !name.trim()) return;
+    const hours = window.prompt('Hours', String(x.hours ?? 0));
+    if (hours === null) return;
+    rename.mutate({ path: `/academics/subjects/${x.id}`, body: { name: name.trim(), hours: Number(hours) || 0 } });
+  };
+  const editModule = (m: any) => {
+    const name = window.prompt('Module name', m.name);
+    if (name && name.trim()) rename.mutate({ path: `/academics/modules/${m.id}`, body: { name: name.trim() } });
+  };
+  const manage = can('academics:manage', 'masters:manage');
   if (!data) return null;
   return (
     <div className="space-y-3 border-t border-slate-100 bg-slate-50/50 p-5">
       {data.subjects.map((x: any) => (
         <div key={x.id} className="rounded-lg border border-slate-200 bg-white p-4">
-          <p className="font-medium">{x.sequence}. {x.name} <span className="text-xs text-slate-500">({x.code} · {x.hours} hrs)</span></p>
+          <div className="flex items-start justify-between gap-2">
+            <p className="font-medium">{x.sequence}. {x.name} <span className="text-xs text-slate-500">({x.code} · {x.hours} hrs)</span></p>
+            {manage && <span className="flex shrink-0 gap-1">
+              <button className="btn-ghost btn-sm" onClick={() => editSubject(x)} aria-label={`Edit subject ${x.name}`}><Pencil className="h-4 w-4" /></button>
+              <button className="btn-ghost btn-sm text-rose-600" onClick={() => confirmDelete(`subject "${x.name}" and its modules`) && del.mutate(`/academics/subjects/${x.id}`)} aria-label={`Delete subject ${x.name}`}><Trash2 className="h-4 w-4" /></button>
+            </span>}
+          </div>
           <ul className="mt-2 flex flex-wrap gap-2">
-            {x.modules.map((m: any) => <li key={m.id}><button disabled={!can('academics:manage', 'attendance:mark')} onClick={() => toggle.mutate({ id: m.id, completed: !m.completed })} className={`chip ring-1 ring-inset ${m.completed ? 'bg-emerald-50 text-emerald-700 ring-emerald-200' : 'bg-slate-50 text-slate-600 ring-slate-200'}`}>{m.completed ? '✓ ' : ''}{m.name}</button></li>)}
+            {x.modules.map((m: any) => <li key={m.id} className="flex items-center gap-0.5"><button disabled={!can('academics:manage', 'attendance:mark')} onClick={() => toggle.mutate({ id: m.id, completed: !m.completed })} className={`chip ring-1 ring-inset ${m.completed ? 'bg-emerald-50 text-emerald-700 ring-emerald-200' : 'bg-slate-50 text-slate-600 ring-slate-200'}`}>{m.completed ? '✓ ' : ''}{m.name}</button>
+              {manage && <><button className="rounded p-0.5 text-slate-400 hover:text-slate-700" onClick={() => editModule(m)} aria-label={`Rename module ${m.name}`}><Pencil className="h-3 w-3" /></button>
+              <button className="rounded p-0.5 text-slate-400 hover:text-rose-600" onClick={() => confirmDelete(`module "${m.name}"`) && del.mutate(`/academics/modules/${m.id}`)} aria-label={`Delete module ${m.name}`}><X className="h-3 w-3" /></button></>}</li>)}
             {can('academics:manage') && <li className="flex gap-1"><input className="input h-7 w-40 py-0 text-xs" placeholder="Add module" value={mod[x.id] ?? ''} onChange={(e) => setMod({ [x.id]: e.target.value })} onKeyDown={(e) => e.key === 'Enter' && mod[x.id] && addM.mutate(x.id)} /></li>}
           </ul>
         </div>
@@ -83,6 +105,7 @@ export default function AcademicCourses() {
   const { data, isLoading } = useGet<any>('/academics/courses?all=1');
   const [edit, setEdit] = useState<any>(null);
   const [open, setOpen] = useState<string | null>(null);
+  const delCourse = useDelete('Course', ['/academics', 'site']);
   if (isLoading) return <PageLoader />;
   return (
     <div>
@@ -96,7 +119,10 @@ export default function AcademicCourses() {
                 <div><p className="font-medium">{c.name} <span className="text-xs text-slate-500">{c.code}</span> {!c.isActive && <Badge status="CANCELLED">Inactive</Badge>} {!c.isPublic && <Badge>Hidden</Badge>}</p><p className="text-xs text-slate-500">{c.durationMonths} months · {c._count.subjects} subjects · {c._count.batches} batches · {c._count.students} students</p></div>
               </button>
               <span className="text-sm font-semibold">{inr(c.totalFee)}</span>
-              {can('masters:manage', 'academics:manage') && <button className="btn-secondary btn-sm" onClick={() => setEdit(c)}>Edit</button>}
+              {can('masters:manage', 'academics:manage') && <span className="flex gap-2">
+                <button className="btn-secondary btn-sm" onClick={() => setEdit(c)}>Edit</button>
+                <button className="btn-secondary btn-sm text-rose-600" onClick={() => confirmDelete(`course "${c.name}" with its subjects, modules and fee structure`) && delCourse.mutate(`/academics/courses/${c.id}`)}><Trash2 className="h-4 w-4" /> Delete</button>
+              </span>}
             </div>
             {open === c.id && <Curriculum courseId={c.id} />}
           </div>

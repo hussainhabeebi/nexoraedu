@@ -14,6 +14,9 @@ export default async function setup() {
     const { initDb, prisma } = await import('../src/lib/prisma');
     initDb(p.env.DB);
     const { seedDemo } = await import('../src/seed/demo');
+    const { DEFAULT_SETTINGS } = await import('../src/lib/settings');
+    // The suite exercises the strict mode (authenticator code required); 21-mfa-setting tests the default (off).
+    await (prisma as any).setting.create({ data: { key: 'security', value: { ...DEFAULT_SETTINGS.security, mfaRequired: true } } });
     await seedDemo(prisma as any, { ...process.env, APP_ENV: 'test', NODE_ENV: 'test', DEMO_PASSWORD: 'Test-Only#Passw0rd!2026' });
   } finally {
     await p.dispose();

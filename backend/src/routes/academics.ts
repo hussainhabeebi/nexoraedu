@@ -11,6 +11,7 @@ import { slugify } from '../lib/util';
 import { createApproval } from '../services/approvals';
 import { notifyLater } from '../services/notify';
 import { atomic } from '../lib/db';
+import { DELETE_SPECS, deleteIfUnused } from '../services/setupDelete';
 
 const r = Router();
 
@@ -446,5 +447,13 @@ r.patch('/submissions/:id', can('materials:manage'), ah(async (req, res) => {
   });
   res.json(u);
 }));
+
+
+// ── Delete setup items: only while nothing uses them (services/setupDelete.ts) ──
+r.delete('/courses/:id', can('masters:manage', 'academics:manage'), ah(async (req, res) => res.json(await deleteIfUnused(DELETE_SPECS.course, req.params.id, req))));
+r.delete('/subjects/:id', can('academics:manage', 'masters:manage'), ah(async (req, res) => res.json(await deleteIfUnused(DELETE_SPECS.subject, req.params.id, req))));
+r.delete('/modules/:id', can('academics:manage', 'masters:manage'), ah(async (req, res) => res.json(await deleteIfUnused(DELETE_SPECS.module, req.params.id, req))));
+r.delete('/batches/:id', can('academics:manage'), ah(async (req, res) => res.json(await deleteIfUnused(DELETE_SPECS.batch, req.params.id, req))));
+r.delete('/timetable/:id', can('academics:manage'), ah(async (req, res) => res.json(await deleteIfUnused(DELETE_SPECS.session, req.params.id, req))));
 
 export default r;

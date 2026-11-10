@@ -51,6 +51,10 @@ export const signAccess = (userId: string, sessionId: string, authVersion: numbe
 // ── Effective permissions, cached per user+authVersion (invalidated by any authVersion bump) ──
 const permCache = new Map<string, { at: number; v: Omit<AuthUser, 'sessionId' | 'mfaVerified'> }>();
 const PERM_TTL = 60_000;
+/** Drop cached permissions/MFA flags (e.g. after the security settings change). */
+export function clearAuthCache() {
+  permCache.clear();
+}
 
 export async function loadAuthUser(userId: string, authVersion?: number): Promise<Omit<AuthUser, 'sessionId' | 'mfaVerified'> | null> {
   const key = `${userId}:${authVersion ?? '?'}`;
@@ -62,7 +66,8 @@ export async function loadAuthUser(userId: string, authVersion?: number): Promis
   const perms = new Set<string>((u.extraPermissions as string[] | null) ?? []);
   u.roles.forEach((r) => ((r.role.permissions as string[] | null) ?? []).forEach((p) => perms.add(p)));
   const roles = u.roles.map((r) => r.role.key);
-  const v = { id: u.id, name: u.name, email: u.email, roles, perms: [...perms], studentId: u.student?.id, mfaRequired: requiresMfa(roles), mustChangePassword: u.mustChangePassword };
+  const mfaOn = (await getSettings()).security.mfaRequired === true;
+  const v = { id: u.id, name: u.name, email: u.email, roles, perms: [...perms], studentId: u.student?.id, mfaRequired: mfaOn && requiresMfa(roles), mustChangePassword: u.mustChangePassword };
   if (authVersion !== undefined) {
     if (permCache.size > 5000) permCache.clear();
     permCache.set(key, { at: Date.now(), v });

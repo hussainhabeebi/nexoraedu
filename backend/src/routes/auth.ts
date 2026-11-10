@@ -162,14 +162,16 @@ r.post('/login', ...signIn.login, ah(async (req, res) => {
   const rehash = bcrypt.getRounds(user.passwordHash) < BCRYPT_COST ? await hashPassword(password) : undefined;
   await prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0, lockedUntil: null, ...(rehash && { passwordHash: rehash }) } });
 
-  if (user.mfaFactor?.confirmedAt) {
+  // MFA at sign-in only while the Security setting "mfaRequired" is on (off by default).
+  const mfaOn = (await getSettings()).security.mfaRequired === true;
+  if (mfaOn && user.mfaFactor?.confirmedAt) {
     const token = randomToken(32);
     await prisma.mfaChallenge.create({ data: { userId: user.id, tokenHash: sha256(token), portal, expiresAt: new Date(Date.now() + MFA_CHALLENGE_MINUTES * 60_000) } });
     await securityEvent(prisma, req, { event: 'PASSWORD_OK_MFA_PENDING', userId: user.id, identifier: id, success: true });
     return res.json({ mfaRequired: true, mfaToken: token, expiresIn: MFA_CHALLENGE_MINUTES * 60 });
   }
   await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
-  await securityEvent(prisma, req, { event: requiresMfa(roleKeys) ? 'LOGIN_OK_MFA_ENROLMENT_REQUIRED' : 'LOGIN_OK', userId: user.id, identifier: id, success: true });
+  await securityEvent(prisma, req, { event: mfaOn && requiresMfa(roleKeys) ? 'LOGIN_OK_MFA_ENROLMENT_REQUIRED' : 'LOGIN_OK', userId: user.id, identifier: id, success: true });
   res.json(await issue(req, res, user.id, false));
 }));
 

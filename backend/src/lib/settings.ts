@@ -14,7 +14,11 @@ export const DEFAULT_SETTINGS = {
     timeZone: 'Asia/Kolkata',
   },
   ids: { student: 'NXA-{YYYY}-#####', lead: 'LD-{YY}{MM}-#####', application: 'APP-{YYYY}-#####', invoice: 'INV-{YYYY}-######', receipt: 'RCP-{YYYY}-######', certificate: 'NXC-{YYYY}-#####' },
-  security: { sessionTimeoutMin: 30, passwordMinLength: 10, maxFailedLogins: 5, lockMinutes: 15, activationHours: 72 },
+  /**
+   * mfaRequired: ask privileged roles for an authenticator code at every sign-in (and make them enrol one).
+   * Off by default (owner decision 2026-11-10); a Super Administrator can switch it on in Settings → Security.
+   */
+  security: { sessionTimeoutMin: 30, passwordMinLength: 10, maxFailedLogins: 5, lockMinutes: 15, activationHours: 72, mfaRequired: false },
   crm: { autoAssign: 'round_robin', inactivityDays: 3 },
   finance: { discountApprovalLimit: 5000, reminderDaysBefore: [3, 1], reminderDaysAfter: [1, 7], monthlyTarget: 1000000 },
   academics: { attendanceThreshold: 75, attendanceEditWindowHours: 24 },

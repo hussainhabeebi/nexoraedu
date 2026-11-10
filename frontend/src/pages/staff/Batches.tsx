@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus } from 'lucide-react';
+import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { useCourses, useGet, useMut } from '@/lib/hooks';
+import { confirmDelete, useCourses, useDelete, useGet, useMut } from '@/lib/hooks';
 import { d, label } from '@/lib/format';
 import { DataTable } from '@/components/DataTable';
 import { Badge, Input, Modal, PageHeader, Progress, Select } from '@/components/ui';
@@ -38,6 +38,8 @@ export default function Batches() {
   const [status, setStatus] = useState('');
   const { data, isLoading } = useGet<any>(`/academics/batches${status ? `?status=${status}` : ''}`);
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<any>(null);
+  const del = useDelete('Batch', ['/academics']);
   return (
     <div>
       <PageHeader title="Batches" actions={can('academics:manage') && <button className="btn-primary" onClick={() => setOpen(true)}><Plus className="h-4 w-4" /> New batch</button>} />
@@ -50,8 +52,15 @@ export default function Batches() {
           { key: 'timing', header: 'Timing', cell: (r: any) => r.timing ?? '—' },
           { key: 'seats', header: 'Seats', cell: (r: any) => <div className="w-32"><div className="mb-1 text-xs">{r._count.students} / {r.capacity}</div><Progress value={(r._count.students / r.capacity) * 100} tone={r._count.students >= r.capacity ? 'rose' : 'brand'} /></div> },
           { key: 'status', header: 'Status', cell: (r: any) => <Badge status={r.status} /> },
+          ...(can('academics:manage') ? [{ key: 'actions', header: '', cell: (r: any) => (
+            <span className="flex justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+              <button className="btn-ghost btn-sm" onClick={() => setEditing(r)} aria-label={`Edit batch ${r.code}`}><Pencil className="h-4 w-4" /></button>
+              <button className="btn-ghost btn-sm text-rose-600" onClick={() => confirmDelete(`batch ${r.code}`) && del.mutate(`/academics/batches/${r.id}`)} aria-label={`Delete batch ${r.code}`}><Trash2 className="h-4 w-4" /></button>
+            </span>
+          ) }] : []),
         ]} />
       {open && <BatchModal open onClose={() => setOpen(false)} />}
+      {editing && <BatchModal open onClose={() => setEditing(null)} batch={editing} />}
     </div>
   );
 }
