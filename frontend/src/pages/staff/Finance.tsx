@@ -109,6 +109,53 @@ function Outstanding() {
   );
 }
 
+function MonthlyDues() {
+  const { can } = useAuth();
+  const now = new Date();
+  const [f, setF] = useState({ month: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`, status: '', mine: can('finance:manage') ? '' : 'true' });
+  const [page, setPage] = useState(1);
+  const { data, isLoading } = useGet<any>(`/finance/summary${qs({ ...f, page, pageSize: 25 })}`);
+  const remind = useMut((studentIds: string[]) => api('/finance/reminders/send', { body: { studentIds } }), { success: reminderSummary, invalidate: ['/finance/reminders'] });
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="text-sm"><span className="label">Fee month</span><input type="month" className="input" value={f.month} onChange={(e) => { setPage(1); setF({ ...f, month: e.target.value }); }} /></label>
+        <label className="flex items-center gap-1.5 pb-2 text-sm"><input type="checkbox" className="rounded text-brand-600" checked={f.mine === 'true'} onChange={(e) => { setPage(1); setF({ ...f, mine: e.target.checked ? 'true' : '' }); }} /> Assigned to me</label>
+      </div>
+      {isLoading || !data ? <PageLoader /> : (
+        <>
+          <div className="grid gap-4 sm:grid-cols-4">
+            <Stat label="Expected" value={inr(data.totals.expected, { decimals: false })} tone="sky" />
+            <Stat label="Collected" value={inr(data.totals.collected, { decimals: false })} tone="green" />
+            <Stat label="Outstanding" value={inr(data.totals.outstanding, { decimals: false })} tone="amber" />
+            <Stat label="Overdue (this month)" value={inr(data.totals.overdue, { decimals: false })} tone="rose" />
+          </div>
+          <div className="grid gap-4 sm:grid-cols-5">
+            {[['', 'All students', data.students.total], ['PAID', 'Paid', data.students.paid], ['PARTIAL', 'Partially paid', data.students.partial], ['UNPAID', 'Unpaid', data.students.unpaid], ['OVERDUE', 'Overdue', data.students.overdue]].map(([k, l, n]) => (
+              <button key={k as string} className={`card px-4 py-3 text-left ${f.status === k ? 'ring-2 ring-brand-500' : ''}`} onClick={() => { setPage(1); setF({ ...f, status: k as string }); }}>
+                <div className="text-xs text-slate-500">{l}</div><div className="text-xl font-semibold">{n}</div>
+              </button>
+            ))}
+          </div>
+          <p className="text-sm text-slate-600">All months: <b className="text-rose-600">{inr(data.allMonthsOverdue.amount)}</b> overdue from {data.allMonthsOverdue.students} student(s).</p>
+          <DataTable rows={data.items.map((r: any) => ({ ...r, id: r.studentId }))} total={data.total} page={page} pageSize={25} onPage={setPage}
+            empty={<Empty title="No fees billed for this month" />}
+            columns={[
+              { key: 'name', header: 'Student', cell: (r: any) => <><Link className="link" to={`/staff/students/${r.studentId}?tab=fees`}>{r.name}</Link><div className="text-xs text-slate-500">{r.studentCode}</div></> },
+              { key: 'course', header: 'Course / batch', cell: (r: any) => `${r.course}${r.batch ? ` · ${r.batch}` : ''}` },
+              { key: 'due', header: 'Due date', cell: (r: any) => d(r.dueDate) },
+              { key: 'exp', header: 'Fee', cell: (r: any) => inr(r.expected) },
+              { key: 'paid', header: 'Paid', cell: (r: any) => inr(r.paid) },
+              { key: 'out', header: 'Outstanding', cell: (r: any) => <span className={r.outstanding > 0 ? 'font-semibold text-rose-600' : ''}>{inr(r.outstanding)}</span> },
+              { key: 'status', header: 'Status', cell: (r: any) => <><Badge status={r.overdueDays > 0 ? 'OVERDUE' : r.status} />{r.overdueDays > 0 && <span className="text-xs text-slate-500"> · {r.overdueDays} d</span>}</> },
+              ...(can('finance:collect') ? [{ key: 'remind', header: '', cell: (r: any) => (r.outstanding > 0 ? <button className="btn-ghost btn-sm" disabled={remind.isPending} onClick={() => remind.mutate([r.studentId])} aria-label={`Remind ${r.name}`}><BellRing className="h-4 w-4" /></button> : null) }] : []),
+            ]} />
+        </>
+      )}
+    </div>
+  );
+}
+
 const reminderSummary = (r: any) =>
   `${r.queued} reminder(s) for ${r.students} student(s): ${r.sent} sent${r.failed ? `, ${r.failed} failed (will retry)` : ''}${r.skipped ? `, ${r.skipped} skipped` : ''}${r.pending ? `, ${r.pending} queued` : ''}${r.duplicate ? ` · ${r.duplicate} already sent today` : ''}`;
 
@@ -175,11 +222,12 @@ function Collections() {
 export default function Finance() {
   const loc = useLocation();
   const nav = useNavigate();
-  const tab = (loc.pathname.split('/')[3] as 'payments' | 'outstanding' | 'reminders' | 'collections') || 'payments';
+  const tab = (loc.pathname.split('/')[3] as 'dues' | 'payments' | 'outstanding' | 'reminders' | 'collections') || 'dues';
   return (
     <div>
       <PageHeader title="Fees & payments" subtitle="Record payments, track dues and reconcile collections." />
-      <Tabs value={tab} onChange={(k) => nav(`/staff/finance/${k}`)} tabs={[{ key: 'payments', label: 'Payments' }, { key: 'outstanding', label: 'Outstanding & ageing' }, { key: 'reminders', label: 'Reminders' }, { key: 'collections', label: 'Collections' }]} />
+      <Tabs value={tab} onChange={(k) => nav(`/staff/finance/${k}`)} tabs={[{ key: 'dues', label: 'Monthly dues' }, { key: 'payments', label: 'Payments' }, { key: 'outstanding', label: 'Outstanding & ageing' }, { key: 'reminders', label: 'Reminders' }, { key: 'collections', label: 'Collections' }]} />
+      {tab === 'dues' && <MonthlyDues />}
       {tab === 'payments' && <Payments />}
       {tab === 'outstanding' && <Outstanding />}
       {tab === 'reminders' && <Reminders />}

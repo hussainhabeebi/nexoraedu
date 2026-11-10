@@ -14,6 +14,7 @@ import { createApproval } from '../services/approvals';
 import { ACTIVE_REFUND_STATUSES, assertCancellationKeepsRefundsCovered, courseFee, createFeePlan, installmentFeeMonth, ledger, lockStudentAccount, recordPayment, studentBalance } from '../services/finance';
 import { earlierPlansForCourse, feeEnrollmentChain, requestFeeAdjustment, requestRebill } from '../services/feeAdjustments';
 import { notifyLater } from '../services/notify';
+import { feeMonthLedger, monthSummary } from '../services/feeSummary';
 import { enqueueManualReminders, mask, processReminderQueue, runFeeReminders } from '../services/feeReminders';
 import { atomic } from '../lib/db';
 import { dbDate } from '../lib/db';
@@ -325,6 +326,49 @@ r.get('/collections', can('finance:read'), ah(async (req, res) => {
     byDay: rows.map((r) => ({ day: r.day, amount: r.amount, count: Number(r.count) })),
     byCourse, byCollector,
   });
+}));
+
+// ── Pending fee management (services/feeSummary.ts) ──
+
+// Finance Dashboard for a fee month (?month=YYYY-MM, default this month): totals, paid / partial / unpaid, overdue.
+r.get('/summary', can('finance:read'), ah(async (req, res) => {
+  const where = req.query.mine === 'true' ? { financeOwnerId: req.user!.id } : {};
+  const out = await monthSummary(req.query.month ? String(req.query.month) : undefined, where);
+  let items = out.items;
+  const st = String(req.query.status ?? '');
+  if (st === 'OVERDUE') items = items.filter((i) => i.overdueDays > 0);
+  else if (['PAID', 'PARTIAL', 'UNPAID'].includes(st)) items = items.filter((i) => i.status === st);
+  const { skip, take, page, pageSize } = paging(req.query);
+  res.json({ ...out, items: items.slice(skip, skip + take), page, pageSize, total: items.length });
+}));
+
+// Per-student ledger by fee month.
+r.get('/students/:id/fee-months', can('finance:read'), ah(async (req, res) => {
+  const st = await prisma.student.findUnique({ where: { id: req.params.id }, select: { id: true, fullName: true, studentCode: true, status: true, course: { select: { name: true } }, batch: { select: { code: true } }, financeOwner: { select: { id: true, name: true } } } });
+  if (!st) throw notFound('Student not found');
+  res.json({ student: st, ...(await feeMonthLedger(st.id)) });
+}));
+
+// Finance users a student can be assigned to.
+r.get('/collectors', can('finance:read'), ah(async (_req, res) => {
+  const items = await prisma.user.findMany({ where: { isActive: true, roles: { some: { role: { key: { in: ['finance_staff', 'finance_manager'] } } } } }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
+  res.json({ items });
+}));
+
+// Assign a student's collection and follow-ups to a finance user (Finance Manager / Super Admin).
+r.put('/students/:id/finance-owner', can('finance:manage'), ah(async (req, res) => {
+  const { userId } = z.object({ userId: z.string().nullable() }).parse(req.body);
+  const st = await prisma.student.findUnique({ where: { id: req.params.id }, select: { id: true, financeOwnerId: true } });
+  if (!st) throw notFound('Student not found');
+  if (userId) {
+    const ok = await prisma.user.count({ where: { id: userId, isActive: true, roles: { some: { role: { key: { in: ['finance_staff', 'finance_manager'] } } } } } });
+    if (!ok) throw badRequest('Choose an active Finance Staff or Finance Manager user.');
+  }
+  await atomic(async (tx) => {
+    await tx.student.update({ where: { id: st.id }, data: { financeOwnerId: userId } });
+    await audit(tx, req, 'ASSIGN', 'student_finance_owner', st.id, { financeOwnerId: st.financeOwnerId }, { financeOwnerId: userId });
+  });
+  res.json({ ok: true, financeOwnerId: userId });
 }));
 
 // ── FIN-08 fee reminders (services/feeReminders.ts) ──
