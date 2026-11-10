@@ -73,7 +73,7 @@ function Outstanding() {
   const batches = useBatches(f.courseId || undefined);
   const { data, isLoading } = useGet<any>(`/finance/outstanding${qs(f)}`);
   const { can } = useAuth();
-  const remind = useMut(() => api('/finance/reminders/run', { body: {} }), { success: (r: any) => `${r.sent} reminder(s) sent via WhatsApp / email` });
+  const remind = useMut((studentIds?: string[]) => api('/finance/reminders/send', { body: studentIds ? { studentIds } : { overdueOnly: true } }), { success: reminderSummary, invalidate: ['/finance/reminders'] });
   if (isLoading) return <PageLoader />;
   const b = data.buckets;
   return (
@@ -92,7 +92,7 @@ function Outstanding() {
           <label className="flex items-center gap-1.5 text-sm"><input type="checkbox" className="rounded text-brand-600" checked={f.onlyOverdue === 'true'} onChange={(e) => setF({ ...f, onlyOverdue: String(e.target.checked) })} /> Overdue only</label>
           <span className="ml-auto text-sm font-medium">Total due: {inr(data.total)}</span>
           <button className="btn-secondary btn-sm" onClick={() => download(`/finance/outstanding${qs({ ...f, format: 'csv' })}`, 'outstanding.csv')}><Download className="h-4 w-4" /> CSV</button>
-          {can('finance:collect') && <button className="btn-success btn-sm" disabled={remind.isPending} onClick={() => remind.mutate(undefined)}><BellRing className="h-4 w-4" /> Send reminders</button>}
+          {can('finance:collect') && <button className="btn-success btn-sm" disabled={remind.isPending} onClick={() => remind.mutate(undefined)} title={can('finance:manage') ? 'All overdue students' : 'Overdue students assigned to you'}><BellRing className="h-4 w-4" /> Remind all overdue</button>}
         </>}
         empty={<Empty title="No outstanding fees 🎉" />}
         columns={[
@@ -103,8 +103,92 @@ function Outstanding() {
           { key: 'due', header: 'Total due', cell: (r: any) => inr(r.due) },
           { key: 'overdue', header: 'Overdue', cell: (r: any) => <span className={r.overdue > 0 ? 'font-semibold text-rose-600' : ''}>{inr(r.overdue)}</span> },
           { key: 'days', header: 'Days overdue', cell: (r: any) => (r.maxDaysOverdue > 0 ? r.maxDaysOverdue : '—') },
+          ...(can('finance:collect') ? [{ key: 'remind', header: '', cell: (r: any) => <button className="btn-ghost btn-sm" disabled={remind.isPending} onClick={() => remind.mutate([r.studentId])} aria-label={`Remind ${r.name}`}><BellRing className="h-4 w-4" /> Remind</button> }] : []),
         ]} />
     </div>
+  );
+}
+
+function MonthlyDues() {
+  const { can } = useAuth();
+  const now = new Date();
+  const [f, setF] = useState({ month: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`, status: '', mine: can('finance:manage') ? '' : 'true' });
+  const [page, setPage] = useState(1);
+  const { data, isLoading } = useGet<any>(`/finance/summary${qs({ ...f, page, pageSize: 25 })}`);
+  const remind = useMut((studentIds: string[]) => api('/finance/reminders/send', { body: { studentIds } }), { success: reminderSummary, invalidate: ['/finance/reminders'] });
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="text-sm"><span className="label">Fee month</span><input type="month" className="input" value={f.month} onChange={(e) => { setPage(1); setF({ ...f, month: e.target.value }); }} /></label>
+        <label className="flex items-center gap-1.5 pb-2 text-sm"><input type="checkbox" className="rounded text-brand-600" checked={f.mine === 'true'} onChange={(e) => { setPage(1); setF({ ...f, mine: e.target.checked ? 'true' : '' }); }} /> Assigned to me</label>
+      </div>
+      {isLoading || !data ? <PageLoader /> : (
+        <>
+          <div className="grid gap-4 sm:grid-cols-4">
+            <Stat label="Expected" value={inr(data.totals.expected, { decimals: false })} tone="sky" />
+            <Stat label="Collected" value={inr(data.totals.collected, { decimals: false })} tone="green" />
+            <Stat label="Outstanding" value={inr(data.totals.outstanding, { decimals: false })} tone="amber" />
+            <Stat label="Overdue (this month)" value={inr(data.totals.overdue, { decimals: false })} tone="rose" />
+          </div>
+          <div className="grid gap-4 sm:grid-cols-5">
+            {[['', 'All students', data.students.total], ['PAID', 'Paid', data.students.paid], ['PARTIAL', 'Partially paid', data.students.partial], ['UNPAID', 'Unpaid', data.students.unpaid], ['OVERDUE', 'Overdue', data.students.overdue]].map(([k, l, n]) => (
+              <button key={k as string} className={`card px-4 py-3 text-left ${f.status === k ? 'ring-2 ring-brand-500' : ''}`} onClick={() => { setPage(1); setF({ ...f, status: k as string }); }}>
+                <div className="text-xs text-slate-500">{l}</div><div className="text-xl font-semibold">{n}</div>
+              </button>
+            ))}
+          </div>
+          <p className="text-sm text-slate-600">All months: <b className="text-rose-600">{inr(data.allMonthsOverdue.amount)}</b> overdue from {data.allMonthsOverdue.students} student(s).</p>
+          <DataTable rows={data.items.map((r: any) => ({ ...r, id: r.studentId }))} total={data.total} page={page} pageSize={25} onPage={setPage}
+            empty={<Empty title="No fees billed for this month" />}
+            columns={[
+              { key: 'name', header: 'Student', cell: (r: any) => <><Link className="link" to={`/staff/students/${r.studentId}?tab=fees`}>{r.name}</Link><div className="text-xs text-slate-500">{r.studentCode}</div></> },
+              { key: 'course', header: 'Course / batch', cell: (r: any) => `${r.course}${r.batch ? ` · ${r.batch}` : ''}` },
+              { key: 'due', header: 'Due date', cell: (r: any) => d(r.dueDate) },
+              { key: 'exp', header: 'Fee', cell: (r: any) => inr(r.expected) },
+              { key: 'paid', header: 'Paid', cell: (r: any) => inr(r.paid) },
+              { key: 'out', header: 'Outstanding', cell: (r: any) => <span className={r.outstanding > 0 ? 'font-semibold text-rose-600' : ''}>{inr(r.outstanding)}</span> },
+              { key: 'status', header: 'Status', cell: (r: any) => <><Badge status={r.overdueDays > 0 ? 'OVERDUE' : r.status} />{r.overdueDays > 0 && <span className="text-xs text-slate-500"> · {r.overdueDays} d</span>}</> },
+              ...(can('finance:collect') ? [{ key: 'remind', header: '', cell: (r: any) => (r.outstanding > 0 ? <button className="btn-ghost btn-sm" disabled={remind.isPending} onClick={() => remind.mutate([r.studentId])} aria-label={`Remind ${r.name}`}><BellRing className="h-4 w-4" /></button> : null) }] : []),
+            ]} />
+        </>
+      )}
+    </div>
+  );
+}
+
+const reminderSummary = (r: any) =>
+  `${r.queued} reminder(s) for ${r.students} student(s): ${r.sent} sent${r.failed ? `, ${r.failed} failed (will retry)` : ''}${r.skipped ? `, ${r.skipped} skipped` : ''}${r.pending ? `, ${r.pending} queued` : ''}${r.duplicate ? ` · ${r.duplicate} already sent today` : ''}`;
+
+const STAGE = (s: string) => (s.startsWith('MANUAL_') ? `Manual (${s.slice(7)})` : s === 'DUE' ? 'Due day' : s.startsWith('BEFORE_') ? `${s.slice(7)} days before` : `${s.slice(8)} day(s) overdue`);
+
+function Reminders() {
+  const { can } = useAuth();
+  const [f, setF] = useState({ status: '', channel: '', trigger: '' });
+  const [page, setPage] = useState(1);
+  const { data, isLoading } = useGet<any>(`/finance/reminders${qs({ ...f, page, pageSize: 25 })}`);
+  const retry = useMut((id: string) => api(`/finance/reminders/${id}/retry`, { body: {} }), { success: (r: any) => (r.sent ? 'Reminder sent' : `Not sent: ${r.reminder?.lastError ?? 'see status'}`), invalidate: ['/finance/reminders'] });
+  const run = useMut(() => api('/finance/reminders/run', { body: {} }), { success: (r: any) => `Schedule run: ${r.queued} queued, ${r.sent} sent, ${r.failed} failed, ${r.skipped} skipped`, invalidate: ['/finance/reminders'] });
+  return (
+    <>
+      <p className="mb-4 text-sm text-slate-600">Automatic reminders go to students and their parents / guardians 5 and 2 days before the due date, on the due date, the day after, and then every 7 days until paid (WhatsApp and email where configured, and in-app). Each reminder is sent once; failed ones are retried automatically.</p>
+      <DataTable rows={data?.items ?? []} loading={isLoading} total={data?.total} page={page} pageSize={25} onPage={setPage}
+        toolbar={<>
+          <select className="input w-auto" value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })} aria-label="Status"><option value="">All statuses</option>{['SENT', 'FAILED', 'QUEUED', 'SKIPPED'].map((m) => <option key={m} value={m}>{label(m)}</option>)}</select>
+          <select className="input w-auto" value={f.channel} onChange={(e) => setF({ ...f, channel: e.target.value })} aria-label="Channel"><option value="">All channels</option>{['WHATSAPP', 'EMAIL', 'IN_APP'].map((m) => <option key={m} value={m}>{label(m)}</option>)}</select>
+          <select className="input w-auto" value={f.trigger} onChange={(e) => setF({ ...f, trigger: e.target.value })} aria-label="Type"><option value="">Automatic and manual</option><option value="AUTO">Automatic</option><option value="MANUAL">Manual</option></select>
+          {can('finance:manage') && <button className="btn-secondary btn-sm ml-auto" disabled={run.isPending} onClick={() => run.mutate(undefined)}><BellRing className="h-4 w-4" /> Run schedule now</button>}
+        </>}
+        empty={<Empty title="No reminders yet" />}
+        columns={[
+          { key: 'when', header: 'Created', cell: (r: any) => d(r.createdAt) },
+          { key: 'student', header: 'Student', cell: (r: any) => (r.student ? <Link className="link" to={`/staff/students/${r.student.id}?tab=fees`}>{r.student.fullName}</Link> : '—') },
+          { key: 'to', header: 'Recipient', cell: (r: any) => <>{r.recipient?.name}{r.recipient?.relation && <span className="text-xs text-slate-500"> · {r.recipient.relation}</span>}<div className="text-xs text-slate-500">{label(r.channel)} · {r.address}</div></> },
+          { key: 'fee', header: 'Fee month', cell: (r: any) => <>{r.installment.feeMonth}<div className="text-xs text-slate-500">Due {d(r.installment.dueDate)}</div></> },
+          { key: 'stage', header: 'Reminder', cell: (r: any) => STAGE(r.stage) },
+          { key: 'status', header: 'Status', cell: (r: any) => <><Badge status={r.status} />{r.attempts > 1 && <span className="text-xs text-slate-500"> · {r.attempts} attempts</span>}{r.lastError && <div className="max-w-xs truncate text-xs text-rose-600" title={r.lastError}>{r.lastError}</div>}</> },
+          { key: 'retry', header: '', cell: (r: any) => (r.status === 'FAILED' && can('finance:collect') ? <button className="btn-ghost btn-sm" disabled={retry.isPending} onClick={() => retry.mutate(r.id)}>Retry</button> : null) },
+        ]} />
+    </>
   );
 }
 
@@ -138,13 +222,15 @@ function Collections() {
 export default function Finance() {
   const loc = useLocation();
   const nav = useNavigate();
-  const tab = (loc.pathname.split('/')[3] as 'payments' | 'outstanding' | 'collections') || 'payments';
+  const tab = (loc.pathname.split('/')[3] as 'dues' | 'payments' | 'outstanding' | 'reminders' | 'collections') || 'dues';
   return (
     <div>
       <PageHeader title="Fees & payments" subtitle="Record payments, track dues and reconcile collections." />
-      <Tabs value={tab} onChange={(k) => nav(`/staff/finance/${k}`)} tabs={[{ key: 'payments', label: 'Payments' }, { key: 'outstanding', label: 'Outstanding & ageing' }, { key: 'collections', label: 'Collections' }]} />
+      <Tabs value={tab} onChange={(k) => nav(`/staff/finance/${k}`)} tabs={[{ key: 'dues', label: 'Monthly dues' }, { key: 'payments', label: 'Payments' }, { key: 'outstanding', label: 'Outstanding & ageing' }, { key: 'reminders', label: 'Reminders' }, { key: 'collections', label: 'Collections' }]} />
+      {tab === 'dues' && <MonthlyDues />}
       {tab === 'payments' && <Payments />}
       {tab === 'outstanding' && <Outstanding />}
+      {tab === 'reminders' && <Reminders />}
       {tab === 'collections' && <Collections />}
     </div>
   );

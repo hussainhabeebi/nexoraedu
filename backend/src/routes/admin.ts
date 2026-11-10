@@ -25,7 +25,7 @@ r.get('/users', can('users:read'), ah(async (req, res) => {
   const q = String(req.query.q || '');
   const role = req.query.role ? String(req.query.role) : undefined;
   const where: any = {
-    roles: role ? { some: { role: { key: role } } } : { none: { role: { key: 'student' } } },
+    roles: role ? { some: { role: { key: role } } } : { none: { role: { key: { in: ['student', 'parent'] } } } },
     ...(q && { OR: [{ name: { contains: q } }, { email: { contains: q } }, { username: { contains: q } }] }),
     ...(req.query.active && { isActive: req.query.active === 'true' }),
   };
@@ -337,6 +337,19 @@ r.put('/settings/:key', can('settings:manage'), ah(async (req, res) => {
   const value: any = { ...before, ...z.record(z.string(), z.any()).parse(req.body) };
   if (key === 'academy' && value.timeZone !== undefined && !isValidTimeZone(String(value.timeZone))) throw badRequest('Unknown time zone. Use an IANA name such as Asia/Kolkata.');
   // Changing the zone affects NEW fee plans only; existing plans keep their stored due dates and recorded zone.
+  if (key === 'finance') {
+    const fin = z.object({
+      dueDayOfMonth: z.number().int().min(1).max(28).nullable(),
+      reminderDaysBefore: z.array(z.number().int().min(1).max(27)).max(5),
+      overdueEveryDays: z.number().int().min(1).max(60),
+      overdueMaxDays: z.number().int().min(1).max(365),
+      remindGuardians: z.boolean(),
+      reminderChannels: z.array(z.enum(['IN_APP', 'WHATSAPP', 'EMAIL'])).min(1),
+      reminderMaxAttempts: z.number().int().min(1).max(5),
+    }).partial().parse(value);
+    // A new due day applies to NEW fee plans only; existing installments keep their stored due dates.
+    Object.assign(value, fin);
+  }
   if (key === 'security') {
     // Security floors from the SRS cannot be weakened from the UI (SEC-01, SEC-04, SEC-05).
     const sec = z.object({ sessionTimeoutMin: z.number().int().min(5).max(240), passwordMinLength: z.number().int().min(MIN_LENGTH_FLOOR).max(64), maxFailedLogins: z.number().int().min(3).max(10), lockMinutes: z.number().int().min(5).max(1440), activationHours: z.number().int().min(1).max(168), mfaRequired: z.boolean().default(false) }).parse(value);

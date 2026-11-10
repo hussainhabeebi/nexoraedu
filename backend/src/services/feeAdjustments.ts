@@ -182,7 +182,7 @@ export async function applyFeeAdjustment(tx: Tx, adjustmentId: string, actorId: 
     const maxSeq = (await tx.installment.aggregate({ where: { feePlanId: plan.id }, _max: { seq: true } }))._max.seq ?? 0;
     for (const [n, r] of rows.entries()) {
       const dueDate = endOfDayUtc(parseIsoDate(r.dueDate)!, tz);
-      const inst = await tx.installment.create({ data: { feePlanId: plan.id, seq: maxSeq + n + 1, amount: r.amount, dueDate, adjustmentId: a.id } });
+      const inst = await tx.installment.create({ data: { feePlanId: plan.id, seq: maxSeq + n + 1, amount: r.amount, dueDate, feeMonth: r.dueDate.slice(0, 7), adjustmentId: a.id } });
       const number = await nextNumber('invoice:{year}', s.ids.invoice, tx);
       await tx.invoice.create({ data: { number, studentId: a.studentId, feePlanId: plan.id, installmentId: inst.id, amount: r.amount, dueDate } });
     }

@@ -1,19 +1,21 @@
 /** Finance (SRS §12). Ledger is immutable — corrections are reversing entries only. */
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import PDFDocument from '../lib/pdf';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
-import { ah, badRequest, notFound, paging } from '../lib/http';
+import { ah, badRequest, forbidden, notFound, paging } from '../lib/http';
 import { can, userCan } from '../lib/auth';
 import { audit } from '../lib/audit';
 import { getSettings } from '../lib/settings';
 import { money, toCsv } from '../lib/util';
-import { dayDiff, formatDate, toCalendarDate } from '../lib/caldate';
+import { dayDiff, endOfDayUtc, formatDate, toCalendarDate } from '../lib/caldate';
 import { reconcile } from '../services/reconciliation';
 import { createApproval } from '../services/approvals';
-import { ACTIVE_REFUND_STATUSES, assertCancellationKeepsRefundsCovered, courseFee, createFeePlan, ledger, lockStudentAccount, recordPayment, studentBalance } from '../services/finance';
+import { ACTIVE_REFUND_STATUSES, assertCancellationKeepsRefundsCovered, courseFee, createFeePlan, feeMonthLabel, installmentFeeMonth, ledger, lockStudentAccount, recordPayment, studentBalance } from '../services/finance';
 import { earlierPlansForCourse, feeEnrollmentChain, requestFeeAdjustment, requestRebill } from '../services/feeAdjustments';
 import { notifyLater } from '../services/notify';
+import { feeMonthLedger, monthSummary } from '../services/feeSummary';
+import { enqueueManualReminders, mask, processReminderQueue, runFeeReminders } from '../services/feeReminders';
 import { atomic } from '../lib/db';
 import { dbDate } from '../lib/db';
 
@@ -129,36 +131,67 @@ r.get('/payments', can('finance:read'), ah(async (req, res) => {
   res.json({ items, total, page, pageSize, sum: Number(sum._sum.amount ?? 0) });
 }));
 
+/**
+ * Individual PDF receipt: academy branding and contact details, receipt number, student name and ID, fee month(s)
+ * paid, payment date, amount, payment method and the balance remaining right after this payment (frozen when the
+ * payment was posted; older receipts show the current balance, labelled as such). Cancelled receipts are marked
+ * CANCELLED in the title and across the page; a pending cancellation is noted.
+ */
 export async function receiptPdf(paymentId: string, out: NodeJS.WritableStream) {
   const p = await prisma.payment.findUnique({ where: { id: paymentId }, include: { student: { include: { course: true, batch: true } }, allocations: { include: { installment: true } } } });
   if (!p) throw notFound('Payment not found');
   const s = await getSettings();
-  const bal = await studentBalance(p.studentId);
+  const tz = s.academy.timeZone;
+  const frozen = p.balanceAfter != null;
+  const bal = frozen ? Number(p.balanceAfter) : await studentBalance(p.studentId);
+  const cur = (n: number) => `${s.academy.currency} ${money(n).toFixed(2)}`;
   const doc = new PDFDocument({ size: 'A5', margin: 36 });
   doc.pipe(out);
-  doc.fillColor('#4338ca').fontSize(18).text(s.academy.name, { continued: false });
+  doc.rect(0, 0, doc.page.width, 6).fill('#4338ca');
+  doc.fillColor('#4338ca').fontSize(18).text(s.academy.name, 36, 24);
+  if (s.academy.tagline) doc.fillColor('#6366f1').fontSize(8).text(s.academy.tagline);
   doc.fillColor('#555').fontSize(8).text(`${s.academy.address} · ${s.academy.phone} · ${s.academy.email}`);
   doc.moveDown();
-  doc.fillColor('#111').fontSize(13).text(p.status === 'CANCELLED' ? 'FEE RECEIPT — CANCELLED' : 'FEE RECEIPT', { align: 'center' });
-  doc.moveDown(0.5).fontSize(9);
-  const row = (k: string, v: string) => doc.font('Helvetica-Bold').text(k, { continued: true, width: 120 }).font('Helvetica').text(`  ${v}`);
+  const title = p.status === 'CANCELLED' ? 'FEE RECEIPT — CANCELLED' : 'FEE RECEIPT';
+  doc.fillColor(p.status === 'CANCELLED' ? '#b91c1c' : '#111').fontSize(13).text(title, { align: 'center' });
+  if (p.status === 'CANCEL_REQUESTED') doc.fillColor('#b45309').fontSize(8).text('Cancellation requested — pending approval', { align: 'center' });
+  doc.moveDown(0.5).fillColor('#111').fontSize(9);
+  // Label and value on one line, wrapping only at the page margin.
+  const row = (k: string, v: string) => doc.font('Helvetica-Bold').text(k, { continued: true }).font('Helvetica').text(`  ${v}`);
+  const months = [...new Set(p.allocations.map((a) => feeMonthLabel(installmentFeeMonth(a.installment, tz))))];
   row('Receipt No:', p.receiptNumber);
-  row('Date:', formatDate(p.paidAt, (await getSettings()).academy.timeZone));
-  row('Student:', `${p.student.fullName} (${p.student.studentCode})`);
+  row('Payment date:', formatDate(p.paidAt, tz));
+  row('Student:', p.student.fullName);
+  row('Student ID:', p.student.studentCode);
   row('Course / Batch:', `${p.student.course.name}${p.student.batch ? ' / ' + p.student.batch.code : ''}`);
-  row('Payment mode:', p.mode + (p.reference ? ` — Ref ${p.reference}` : ''));
+  if (months.length) row(months.length > 1 ? 'Fee months:' : 'Fee month:', months.join(', '));
+  row('Payment method:', p.mode.replace(/_/g, ' ') + (p.reference ? ` — Ref ${p.reference}` : ''));
   if (p.payer) row('Paid by:', p.payer);
   doc.moveDown();
-  for (const a of p.allocations) row(`Installment #${a.installment.seq}:`, `${s.academy.currency} ${money(a.amount).toFixed(2)}`);
-  doc.moveDown(0.5).fontSize(12).font('Helvetica-Bold').text(`Amount received: ${s.academy.currency} ${money(p.amount).toFixed(2)}`);
-  doc.fontSize(9).font('Helvetica').text(`Balance outstanding: ${s.academy.currency} ${bal.toFixed(2)}`);
-  doc.moveDown(2).fillColor('#888').fontSize(7).text('This is a computer-generated receipt and does not require a signature.', { align: 'center' });
+  for (const a of p.allocations) row(`${feeMonthLabel(installmentFeeMonth(a.installment, tz))} (installment #${a.installment.seq}):`, cur(Number(a.amount)));
+  doc.moveDown(0.5).fontSize(12).font('Helvetica-Bold').text(`Amount received: ${cur(Number(p.amount))}`);
+  doc.fontSize(9).font('Helvetica').text(frozen ? `Remaining balance after this payment: ${cur(bal)}` : `Current balance outstanding: ${cur(bal)}`);
+  if (p.status === 'CANCELLED') {
+    doc.save().rotate(-30, { origin: [doc.page.width / 2, doc.page.height / 2] }).fillColor('#dc2626').opacity(0.18).fontSize(64).font('Helvetica-Bold')
+      .text('CANCELLED', 0, doc.page.height / 2 - 32, { width: doc.page.width, align: 'center' }).restore();
+    doc.opacity(1);
+  }
+  doc.moveDown(2).fillColor('#888').fontSize(7).font('Helvetica').text('This is a computer-generated receipt and does not require a signature.', { align: 'center' });
   doc.end();
 }
 
+/** Receipt downloads are audit-logged (who, which receipt, through which portal). */
+export async function auditReceiptDownload(req: Request, p: { id: string; receiptNumber: string; studentId: string; status: string }, via: 'staff' | 'student' | 'parent') {
+  await audit(prisma, req, 'DOWNLOAD', 'receipt', p.id, null, { receiptNumber: p.receiptNumber, studentId: p.studentId, status: p.status, via });
+}
+
 r.get('/payments/:id/receipt.pdf', can('finance:read'), ah(async (req, res) => {
+  const p = await prisma.payment.findUnique({ where: { id: req.params.id }, select: { id: true, receiptNumber: true, studentId: true, status: true } });
+  if (!p) throw notFound('Payment not found');
+  await auditReceiptDownload(req, p, 'staff');
   res.setHeader('Content-Type', 'application/pdf');
-  await receiptPdf(req.params.id, res);
+  res.setHeader('Content-Disposition', `inline; filename="${p.receiptNumber}.pdf"`);
+  await receiptPdf(p.id, res);
 }));
 
 // Staff cannot edit/delete a posted payment — only request cancellation (§12 rules)
@@ -326,10 +359,127 @@ r.get('/collections', can('finance:read'), ah(async (req, res) => {
   });
 }));
 
-// FIN-08 manual reminder run (also scheduled in jobs)
-r.post('/reminders/run', can('finance:collect'), ah(async (_req, res) => {
-  const { runFeeReminders } = await import('../jobs/scheduler');
-  res.json({ sent: await runFeeReminders(true) });
+// ── Pending fee management (services/feeSummary.ts) ──
+
+// Finance Dashboard for a fee month (?month=YYYY-MM, default this month): totals, paid / partial / unpaid, overdue.
+r.get('/summary', can('finance:read'), ah(async (req, res) => {
+  const where = req.query.mine === 'true' ? { financeOwnerId: req.user!.id } : {};
+  const out = await monthSummary(req.query.month ? String(req.query.month) : undefined, where);
+  let items = out.items;
+  const st = String(req.query.status ?? '');
+  if (st === 'OVERDUE') items = items.filter((i) => i.overdueDays > 0);
+  else if (['PAID', 'PARTIAL', 'UNPAID'].includes(st)) items = items.filter((i) => i.status === st);
+  const { skip, take, page, pageSize } = paging(req.query);
+  res.json({ ...out, items: items.slice(skip, skip + take), page, pageSize, total: items.length });
+}));
+
+// Per-student ledger by fee month.
+r.get('/students/:id/fee-months', can('finance:read'), ah(async (req, res) => {
+  const st = await prisma.student.findUnique({ where: { id: req.params.id }, select: { id: true, fullName: true, studentCode: true, status: true, course: { select: { name: true } }, batch: { select: { code: true } }, financeOwner: { select: { id: true, name: true } } } });
+  if (!st) throw notFound('Student not found');
+  res.json({ student: st, ...(await feeMonthLedger(st.id)) });
+}));
+
+// Finance users a student can be assigned to.
+r.get('/collectors', can('finance:read'), ah(async (_req, res) => {
+  const items = await prisma.user.findMany({ where: { isActive: true, roles: { some: { role: { key: { in: ['finance_staff', 'finance_manager'] } } } } }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
+  res.json({ items });
+}));
+
+// Assign a student's collection and follow-ups to a finance user (Finance Manager / Super Admin).
+r.put('/students/:id/finance-owner', can('finance:manage'), ah(async (req, res) => {
+  const { userId } = z.object({ userId: z.string().nullable() }).parse(req.body);
+  const st = await prisma.student.findUnique({ where: { id: req.params.id }, select: { id: true, financeOwnerId: true } });
+  if (!st) throw notFound('Student not found');
+  if (userId) {
+    const ok = await prisma.user.count({ where: { id: userId, isActive: true, roles: { some: { role: { key: { in: ['finance_staff', 'finance_manager'] } } } } } });
+    if (!ok) throw badRequest('Choose an active Finance Staff or Finance Manager user.');
+  }
+  await atomic(async (tx) => {
+    await tx.student.update({ where: { id: st.id }, data: { financeOwnerId: userId } });
+    await audit(tx, req, 'ASSIGN', 'student_finance_owner', st.id, { financeOwnerId: st.financeOwnerId }, { financeOwnerId: userId });
+  });
+  res.json({ ok: true, financeOwnerId: userId });
+}));
+
+// ── FIN-08 fee reminders (services/feeReminders.ts) ──
+
+/**
+ * Collection scope: Finance Managers (finance:manage) and Super Admins work on every student; other finance users
+ * (Finance Staff) send reminders and see follow-ups only for students assigned to them (students.financeOwnerId).
+ */
+export const collectionScope = (req: Request) => (userCan(req, 'finance:manage') ? {} : { financeOwnerId: req.user!.id });
+
+// Run the automatic schedule now (normally the cron does this through the day).
+r.post('/reminders/run', can('finance:manage'), ah(async (req, res) => {
+  const out = await runFeeReminders({ ignoreHours: true });
+  await audit(prisma, req, 'REMINDER_RUN', 'fee_reminder', null, null, out);
+  res.json(out);
+}));
+
+// Individual or bulk reminders: the given students (in scope), or every in-scope student with an overdue installment.
+r.post('/reminders/send', can('finance:collect'), ah(async (req, res) => {
+  const b = z.object({ studentIds: z.array(z.string()).min(1).max(200).optional(), overdueOnly: z.boolean().optional() }).refine((x) => x.studentIds || x.overdueOnly, 'Choose students, or overdueOnly').parse(req.body);
+  const scope = collectionScope(req);
+  let ids: string[];
+  if (b.studentIds) {
+    const ok = await prisma.student.findMany({ where: { id: { in: b.studentIds }, ...scope }, select: { id: true } });
+    if (ok.length !== new Set(b.studentIds).size) throw forbidden('You can send reminders only to students assigned to you.');
+    ids = ok.map((x) => x.id);
+  } else {
+    const s = await getSettings();
+    const today = toCalendarDate(new Date(), s.academy.timeZone);
+    const overdue = await prisma.installment.findMany({
+      where: { status: { in: ['DUE', 'PARTIAL'] }, dueDate: { lt: endOfDayUtc({ ...today }, s.academy.timeZone) }, feePlan: { student: { ...scope, status: { notIn: ['WITHDRAWN', 'TERMINATED', 'COMPLETED'] } } } },
+      select: { dueDate: true, feePlan: { select: { studentId: true } } },
+    });
+    ids = [...new Set(overdue.filter((i) => dayDiff(toCalendarDate(i.dueDate, s.academy.timeZone), today) > 0).map((i) => i.feePlan.studentId))].slice(0, 500);
+  }
+  const q = await enqueueManualReminders(ids, req.user!.id);
+  const queuedIds = (await prisma.feeReminder.findMany({ where: { studentId: { in: ids }, trigger: 'MANUAL', status: 'QUEUED', sentById: req.user!.id }, select: { id: true }, take: 50 })).map((x) => x.id);
+  const d = await processReminderQueue({ ids: queuedIds, limit: 50 });
+  const out = { students: ids.length, ...q, ...d, pending: Math.max(0, q.queued - d.sent - d.failed - d.skipped) };
+  await audit(prisma, req, 'REMINDER_SEND', 'fee_reminder', null, null, { studentIds: ids.length <= 20 ? ids : undefined, ...out });
+  res.json(out);
+}));
+
+// Reminder history and delivery status (addresses masked).
+r.get('/reminders', can('finance:read'), ah(async (req, res) => {
+  const { skip, take, page, pageSize } = paging(req.query);
+  const where: any = {};
+  if (req.query.studentId) where.studentId = String(req.query.studentId);
+  if (req.query.status) where.status = String(req.query.status);
+  if (req.query.channel) where.channel = String(req.query.channel);
+  if (req.query.trigger) where.trigger = String(req.query.trigger);
+  const [rows, total] = await Promise.all([
+    prisma.feeReminder.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take, include: { installment: { select: { seq: true, dueDate: true, feeMonth: true } } } }),
+    prisma.feeReminder.count({ where }),
+  ]);
+  const students = await prisma.student.findMany({ where: { id: { in: [...new Set(rows.map((x) => x.studentId))] } }, select: { id: true, fullName: true, studentCode: true } });
+  const guardians = await prisma.guardian.findMany({ where: { id: { in: rows.filter((x) => x.recipientType === 'GUARDIAN').map((x) => x.recipientRef) } }, select: { id: true, name: true, relation: true } });
+  const tz = (await getSettings()).academy.timeZone;
+  res.json({
+    page, pageSize, total,
+    items: rows.map(({ address, installment, ...x }) => ({
+      ...x, address: mask(x.channel, address), student: students.find((s) => s.id === x.studentId) ?? null,
+      recipient: x.recipientType === 'GUARDIAN' ? (guardians.find((g) => g.id === x.recipientRef) ?? { name: 'Guardian (removed)' }) : { name: 'Student' },
+      installment: { seq: installment.seq, dueDate: installment.dueDate, feeMonth: installmentFeeMonth(installment, tz) },
+    })),
+  });
+}));
+
+// Retry a reminder that failed (including one that used up its automatic attempts).
+r.post('/reminders/:id/retry', can('finance:collect'), ah(async (req, res) => {
+  const row = await prisma.feeReminder.findUnique({ where: { id: req.params.id } });
+  if (!row) throw notFound('Reminder not found');
+  if (!(await prisma.student.count({ where: { id: row.studentId, ...collectionScope(req) } }))) throw forbidden('You can retry reminders only for students assigned to you.');
+  if (row.status !== 'FAILED') throw badRequest(`Only failed reminders can be retried (this one is ${row.status.toLowerCase()}).`);
+  const max = (await getSettings()).finance.reminderMaxAttempts;
+  const reset = await prisma.feeReminder.updateMany({ where: { id: row.id, status: 'FAILED', attempts: row.attempts }, data: { attempts: Math.min(row.attempts, max - 1), nextAttemptAt: new Date() } });
+  if (reset.count !== 1) throw badRequest('This reminder changed meanwhile; refresh and try again.');
+  const d = await processReminderQueue({ ids: [row.id], limit: 1 });
+  await audit(prisma, req, 'REMINDER_RETRY', 'fee_reminder', row.id, { status: row.status, attempts: row.attempts }, d);
+  res.json({ ...d, reminder: await prisma.feeReminder.findUnique({ where: { id: row.id }, select: { id: true, status: true, attempts: true, lastError: true, sentAt: true } }) });
 }));
 
 // FIN-13 / RPT-06 reconciliation: read-only consistency check (never modifies records).

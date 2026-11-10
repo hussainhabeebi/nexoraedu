@@ -8,7 +8,8 @@ import { getSettings } from '../lib/settings';
 import { money } from '../lib/util';
 import { studentBalance } from '../services/finance';
 import { autoGrade } from '../services/exams';
-import { receiptPdf } from './finance';
+import { auditReceiptDownload, receiptPdf } from './finance';
+import { feeMonthLedger } from '../services/feeSummary';
 import { certificatePdf } from './exams';
 import { studentAttendancePct } from './academics';
 
@@ -74,13 +75,15 @@ r.get('/fees', ah(async (req, res) => {
     prisma.invoice.findMany({ where: { studentId: s.id }, orderBy: { number: 'asc' } }),
     studentBalance(s.id),
   ]);
-  res.json({ plans, payments, invoices, balance, paymentInfo: { upi: process.env.ACADEMY_UPI_ID || null, bank: process.env.ACADEMY_BANK_DETAILS || null } });
+  res.json({ plans, payments, invoices, balance, months: await feeMonthLedger(s.id), paymentInfo: { upi: process.env.ACADEMY_UPI_ID || null, bank: process.env.ACADEMY_BANK_DETAILS || null } });
 }));
 r.get('/payments/:id/receipt.pdf', ah(async (req, res) => {
   const s = await me(req);
   const p = await prisma.payment.findFirst({ where: { id: req.params.id, studentId: s.id } }); // API-08 object-level auth
   if (!p) throw notFound();
+  await auditReceiptDownload(req, p, 'student');
   res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="${p.receiptNumber}.pdf"`);
   await receiptPdf(p.id, res);
 }));
 

@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { CalendarClock, FileDown, Percent, Plus, Trash2, Undo2, XCircle } from 'lucide-react';
+import { BellRing, CalendarClock, FileDown, Percent, Plus, Trash2, Undo2, XCircle } from 'lucide-react';
 import { api, download } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { useGet, useMasters, useMut } from '@/lib/hooks';
 import { d, dt, inr, label } from '@/lib/format';
+import { FeeMonthsTable } from './FeeMonths';
 import { Badge, Card, Confirm, Empty, Input, Modal, PageLoader, Progress, Select, Spinner, Stat, Textarea } from './ui';
 
 export function RecordPaymentModal({ open, onClose, studentId, balance }: { open: boolean; onClose: () => void; studentId: string; balance: number }) {
@@ -78,6 +79,10 @@ function FeeAdjustmentModal({ open, onClose, studentId, plan, unpaid }: { open: 
 export default function StudentAccount({ studentId }: { studentId: string }) {
   const { can } = useAuth();
   const { data, isLoading } = useGet<any>(`/finance/students/${studentId}/account`);
+  const months = useGet<any>(`/finance/students/${studentId}/fee-months`);
+  const collectors = useGet<any>(can('finance:manage') ? '/finance/collectors' : null, { staleTime: 60_000 });
+  const owner = useMut((userId: string | null) => api(`/finance/students/${studentId}/finance-owner`, { method: 'PUT', body: { userId } }), { success: 'Collection follow-up assigned', invalidate: [`/finance/students/${studentId}`] });
+  const remind = useMut(() => api('/finance/reminders/send', { body: { studentIds: [studentId] } }), { success: (r: any) => (r.queued ? `${r.sent} reminder(s) sent${r.failed ? `, ${r.failed} failed (will retry)` : ''}${r.skipped ? `, ${r.skipped} skipped (channel not configured)` : ''}` : r.duplicate ? 'Already reminded today' : 'Nothing due to remind about'), invalidate: ['/finance/reminders'] });
   const reasons = useMasters('discount_reason');
   const [modal, setModal] = useState<'' | 'pay' | 'discount' | 'refund' | 'plan' | 'adjust'>('');
   const [planId, setPlanId] = useState('');
@@ -154,6 +159,18 @@ export default function StudentAccount({ studentId }: { studentId: string }) {
           </table>
         ) : <Empty title="No fee plan" />}
       </Card>
+
+      <div className="flex flex-wrap items-center gap-3 text-sm">
+        <span className="text-slate-600">Collection follow-up:</span>
+        {can('finance:manage') ? (
+          <select className="input w-auto" aria-label="Assigned finance user" value={months.data?.student.financeOwner?.id ?? ''} onChange={(e) => owner.mutate(e.target.value || null)} disabled={owner.isPending}>
+            <option value="">Unassigned</option>
+            {collectors.data?.items.map((u: any) => <option key={u.id} value={u.id}>{u.name}</option>)}
+          </select>
+        ) : <b>{months.data?.student.financeOwner?.name ?? 'Unassigned'}</b>}
+        {can('finance:collect') && unpaid > 0 && <button className="btn-secondary btn-sm" disabled={remind.isPending} onClick={() => remind.mutate(undefined)}><BellRing className="h-4 w-4" /> Send fee reminder</button>}
+      </div>
+      {months.data && <FeeMonthsTable data={months.data} receiptPath={(id) => `/finance/payments/${id}/receipt.pdf`} />}
 
       <Card title="Payments & receipts" bodyClass="p-0">
         {data.payments.length ? (

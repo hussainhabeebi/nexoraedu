@@ -28,21 +28,48 @@ const fromPaise = (p: number) => p / 100;
 
 /**
  * FIN-03 installment schedule (pure, unit-tested):
- *  - the first installment is due on the start date (a calendar date in the academy zone);
- *  - installment n is due n months later on the same day-of-month, clamped to the month's last day
- *    ("anchor day, clamped": 31 Jan → 28/29 Feb → 31 Mar …, never rolling into the next month);
- *  - each due date is the END of that calendar day in the academy zone, stored in UTC;
+ *  - legacy policy (dueDay = null): the first installment is due on the start date, installment n is due n months
+ *    later on the same day-of-month;
+ *  - fixed due day (dueDay = 10): the first installment is due on the first 10th on or after the start date, every
+ *    later one on the 10th of the following months;
+ *  - either way the day is clamped to the month's last day ("anchor day, clamped": 31 Jan → 28/29 Feb → 31 Mar …,
+ *    never rolling into the next month), and each due date is the END of that calendar day in the academy zone,
+ *    stored in UTC; feeMonth is the due date's month ("YYYY-MM");
  *  - amounts are split in whole paise; the last installment absorbs the remainder.
  */
-export function buildInstallmentSchedule(grossAmount: number, count: number, start: CalendarDate, timeZone: string) {
+export function buildInstallmentSchedule(grossAmount: number, count: number, start: CalendarDate, timeZone: string, dueDay: number | null = null) {
   const n = Math.max(1, Math.floor(count));
   const total = toPaise(grossAmount);
   const base = Math.floor(total / n);
+  const first = firstDueDate(start, dueDay);
+  const anchor = dueDay ?? start.d;
   return Array.from({ length: n }, (_, i) => {
-    const date = addMonthsClamped(start, i, start.d);
-    return { seq: i + 1, amount: fromPaise(i === n - 1 ? total - base * (n - 1) : base), calendarDate: date, dueDate: endOfDayUtc(date, timeZone) };
+    const date = addMonthsClamped(first, i, anchor);
+    return { seq: i + 1, amount: fromPaise(i === n - 1 ? total - base * (n - 1) : base), calendarDate: date, dueDate: endOfDayUtc(date, timeZone), feeMonth: feeMonthOf(date) };
   });
 }
+
+/** First due date: the start date itself (legacy), or the first `dueDay` of a month on or after it. */
+export function firstDueDate(start: CalendarDate, dueDay: number | null): CalendarDate {
+  if (dueDay == null) return start;
+  const thisMonth = addMonthsClamped({ ...start, d: 1 }, 0, dueDay);
+  return start.d <= thisMonth.d ? thisMonth : addMonthsClamped({ ...start, d: 1 }, 1, dueDay);
+}
+
+/** "YYYY-MM" of a calendar date. */
+export const feeMonthOf = (c: CalendarDate) => `${c.y}-${String(c.m).padStart(2, '0')}`;
+
+/** Fee month of an installment: the stored value, else (older installments) its due date's month in the zone. */
+export const installmentFeeMonth = (i: { feeMonth?: string | null; dueDate: Date }, tz: string) => i.feeMonth ?? feeMonthOf(toCalendarDate(i.dueDate, tz));
+
+/** "2026-12" → "December 2026". */
+export function feeMonthLabel(m: string) {
+  const [y, mo] = m.split('-').map(Number);
+  return `${['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][mo - 1]} ${y}`;
+}
+
+/** The configured fixed due day (1–28), or null for the legacy start-day policy. */
+export const validDueDay = (d: unknown) => (Number.isInteger(d) && (d as number) >= 1 && (d as number) <= 28 ? (d as number) : null);
 
 /** Start date for a plan: an ISO calendar date ("YYYY-MM-DD") is taken as-is; an instant is converted to the academy zone. */
 export function planStartDate(input: Date | string | undefined, timeZone: string): CalendarDate {
@@ -71,12 +98,13 @@ export async function createFeePlan(tx: Tx, p: { studentId: string; courseId: st
   const s = await getSettings();
   const tz = s.academy.timeZone;
   const start = planStartDate(p.startDate, tz);
-  const schedule = buildInstallmentSchedule(gross, p.installments ?? course.defaultInstallments, start, tz);
+  const dueDay = validDueDay(s.finance.dueDayOfMonth);
+  const schedule = buildInstallmentSchedule(gross, p.installments ?? course.defaultInstallments, start, tz, dueDay);
   // Link to the enrollment being billed: given explicitly, else the student's current enrollment in this course.
   const enrollmentId = p.enrollmentId ?? (await tx.enrollment.findFirst({ where: { studentId: p.studentId, courseId: p.courseId, status: { in: ['ACTIVE', 'ON_HOLD'] } }, select: { id: true } }))?.id ?? null;
-  const plan = await tx.feePlan.create({ data: { studentId: p.studentId, courseId: p.courseId, grossAmount: gross, components, dueAnchorDay: start.d, dueTimeZone: tz, enrollmentId } });
+  const plan = await tx.feePlan.create({ data: { studentId: p.studentId, courseId: p.courseId, grossAmount: gross, components, dueAnchorDay: dueDay ?? start.d, dueTimeZone: tz, enrollmentId } });
   for (const it of schedule) {
-    const inst = await tx.installment.create({ data: { feePlanId: plan.id, seq: it.seq, amount: it.amount, dueDate: it.dueDate } });
+    const inst = await tx.installment.create({ data: { feePlanId: plan.id, seq: it.seq, amount: it.amount, dueDate: it.dueDate, feeMonth: it.feeMonth } });
     const number = await nextNumber('invoice:{year}', s.ids.invoice, tx);
     await tx.invoice.create({ data: { number, studentId: p.studentId, feePlanId: plan.id, installmentId: inst.id, amount: it.amount, dueDate: it.dueDate } });
   }
@@ -108,10 +136,13 @@ export async function recordPayment(
   const insts = await outstandingInstallments(tx, p.studentId);
   const due = money(insts.reduce((s, i) => s + Number(i.amount) - Number(i.paidAmount), 0));
   if (amount > due + 0.001) throw conflict(`Amount exceeds the outstanding balance of ${due.toFixed(2)}.`);
+  // Balance printed on the receipt: the account balance right after this payment (read before any write here,
+  // with the account locked, so it cannot move underneath us). Frozen on the payment row (DB trigger).
+  const balanceAfter = money((await studentBalance(p.studentId, tx)) - amount);
   const s = await getSettings();
   const receiptNumber = await nextNumber('receipt:{year}', s.ids.receipt, tx);
   const payment = await tx.payment.create({
-    data: { receiptNumber, studentId: p.studentId, amount, mode: p.mode, reference: p.reference, payer: p.payer, paidAt: p.paidAt ?? new Date(), idempotencyKey: p.idempotencyKey, gatewayRef: p.gatewayRef, recordedById: p.userId },
+    data: { receiptNumber, studentId: p.studentId, amount, mode: p.mode, reference: p.reference, payer: p.payer, paidAt: p.paidAt ?? new Date(), idempotencyKey: p.idempotencyKey, gatewayRef: p.gatewayRef, recordedById: p.userId, balanceAfter },
   });
   let left = amount;
   for (const i of insts) {

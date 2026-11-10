@@ -13,6 +13,36 @@ import { Avatar, Badge, Card, Confirm, Empty, Input, KV, Modal, PageLoader, Prog
 type Tab = 'overview' | 'enrollments' | 'fees' | 'academics' | 'documents' | 'history' | 'whatsapp';
 const STATUSES = ['ADMITTED', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'WITHDRAWN', 'TERMINATED'];
 
+/** Guardians, with parent portal access (fees and receipts of this student) managed by student administrators. */
+function Guardians({ studentId, guardians }: { studentId: string; guardians: any[] }) {
+  const { can } = useAuth();
+  const [unlink, setUnlink] = useState<any>(null);
+  const inv = [`/students/${studentId}`];
+  const create = useMut((gid: string) => api(`/students/${studentId}/guardians/${gid}/parent-account`, { body: {} }), {
+    success: (r: any) => (r.linkedExisting ? 'Linked to the existing parent account' : `Parent account ${r.username} created; activation link sent by WhatsApp / email`), invalidate: inv,
+  });
+  const remove = useMut((gid: string) => api(`/students/${studentId}/guardians/${gid}/parent-account`, { method: 'DELETE' }), { success: 'Parent portal access removed', invalidate: inv, onSuccess: () => setUnlink(null) });
+  return (
+    <Card title="Guardians">
+      {guardians.length ? (
+        <ul className="divide-y divide-slate-100 text-sm">
+          {guardians.map((g) => (
+            <li key={g.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+              <span><span className="text-slate-500">{g.relation}:</span> {g.name} · {g.phone}{g.email ? ` · ${g.email}` : ''}</span>
+              {g.userId ? (
+                <span className="flex items-center gap-2"><Badge status="ACTIVE">Parent portal</Badge>{can('students:manage') && <button className="btn-ghost btn-sm" onClick={() => setUnlink(g)}>Remove access</button>}</span>
+              ) : can('students:manage') ? (
+                <button className="btn-secondary btn-sm" disabled={create.isPending || !g.email} title={g.email ? 'Create a parent sign-in to view fees and receipts' : 'Add an email for this guardian first'} onClick={() => create.mutate(g.id)}>Give parent portal access</button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : <p className="text-sm text-slate-500">None recorded</p>}
+      <Confirm open={!!unlink} onClose={() => setUnlink(null)} title="Remove parent portal access?" message={unlink ? `${unlink.name} will no longer see this student's fees and receipts. The account is deactivated if no other children remain linked.` : ''} confirmLabel="Remove access" onConfirm={() => remove.mutate(unlink.id)} />
+    </Card>
+  );
+}
+
 export default function StudentProfile() {
   const { id } = useParams();
   const { can } = useAuth();
@@ -75,7 +105,7 @@ export default function StudentProfile() {
         <div className="grid gap-6 lg:grid-cols-3">
           <div className="space-y-6 lg:col-span-2">
             <Card title="Personal"><KV items={[['Date of birth', d(s.dob)], ['Gender', s.gender], ['Phone', s.phone], ['Email', s.email], ['Address', `${s.address}${s.city ? `, ${s.city}` : ''}`], ['Portal login', s.user ? `${s.studentCode.toLowerCase()} · last login ${s.user.lastLoginAt ? dt(s.user.lastLoginAt) : 'never'}` : '—']]} /></Card>
-            <Card title="Guardians">{s.guardians.length ? <KV cols={1} items={s.guardians.map((g: any) => [g.relation, `${g.name} · ${g.phone}${g.email ? ` · ${g.email}` : ''}`])} /> : <p className="text-sm text-slate-500">None recorded</p>}</Card>
+            <Guardians studentId={s.id} guardians={s.guardians} />
             <Card title="Education">{s.education.length ? <KV cols={1} items={s.education.map((e: any) => [label(e.level), `${e.institution}${e.board ? `, ${e.board}` : ''}${e.year ? ` (${e.year})` : ''}${e.marks ? ` — ${e.marks}` : ''}`])} /> : <p className="text-sm text-slate-500">None recorded</p>}</Card>
           </div>
           <div className="space-y-6">

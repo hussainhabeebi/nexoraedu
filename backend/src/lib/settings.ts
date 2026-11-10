@@ -20,7 +20,21 @@ export const DEFAULT_SETTINGS = {
    */
   security: { sessionTimeoutMin: 30, passwordMinLength: 10, maxFailedLogins: 5, lockMinutes: 15, activationHours: 72, mfaRequired: false },
   crm: { autoAssign: 'round_robin', inactivityDays: 3 },
-  finance: { discountApprovalLimit: 5000, reminderDaysBefore: [3, 1], reminderDaysAfter: [1, 7], monthlyTarget: 1000000 },
+  /**
+   * dueDayOfMonth: every NEW fee plan's installments fall due on this day of each month (academy zone), the first
+   *   one on the first such day on or after the plan's start date. null = legacy policy (admission/start day).
+   *   Existing plans keep their stored due dates.
+   * reminderDaysBefore: automatic reminders this many days before the due date (10th → 5th and 8th), plus the due day.
+   * overdueEveryDays: overdue reminders from the day after the due date (11th), then every N days until paid.
+   * remindGuardians: also remind the student's parents / guardians; reminderChannels: channels tried for each recipient.
+   * reminderMaxAttempts: delivery attempts per reminder (failed ones are retried with back-off).
+   * reminderDaysAfter: legacy setting, no longer used.
+   */
+  finance: {
+    discountApprovalLimit: 5000, monthlyTarget: 1000000, dueDayOfMonth: 10 as number | null,
+    reminderDaysBefore: [5, 2], reminderDaysAfter: [1, 7], overdueEveryDays: 7, overdueMaxDays: 120,
+    remindGuardians: true, reminderChannels: ['IN_APP', 'WHATSAPP', 'EMAIL'] as string[], reminderMaxAttempts: 3,
+  },
   academics: { attendanceThreshold: 75, attendanceEditWindowHours: 24 },
   exams: { minAttendanceForExam: 0, requireFeesCleared: false, gradeScale: [
     { min: 90, grade: 'A+' }, { min: 80, grade: 'A' }, { min: 70, grade: 'B+' }, { min: 60, grade: 'B' }, { min: 50, grade: 'C' }, { min: 40, grade: 'D' }, { min: 0, grade: 'F' },

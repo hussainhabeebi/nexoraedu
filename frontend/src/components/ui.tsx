@@ -66,6 +66,7 @@ const STATUS_TONE: Record<string, string> = {
   WITHDRAWN: 'bg-slate-100 text-slate-600 ring-slate-200', TERMINATED: 'bg-rose-50 text-rose-700 ring-rose-200', APPLIED: 'bg-amber-50 text-amber-700 ring-amber-200',
   PENDING: 'bg-amber-50 text-amber-700 ring-amber-200', APPROVED: 'bg-emerald-50 text-emerald-700 ring-emerald-200', REJECTED: 'bg-rose-50 text-rose-700 ring-rose-200', RETURNED: 'bg-slate-100 text-slate-700 ring-slate-200',
   VERIFIED: 'bg-emerald-50 text-emerald-700 ring-emerald-200', POSTED: 'bg-emerald-50 text-emerald-700 ring-emerald-200', CANCELLED: 'bg-rose-50 text-rose-700 ring-rose-200', CANCEL_REQUESTED: 'bg-amber-50 text-amber-700 ring-amber-200',
+  UNPAID: 'bg-slate-100 text-slate-700 ring-slate-200', QUEUED: 'bg-sky-50 text-sky-700 ring-sky-200', SENDING: 'bg-sky-50 text-sky-700 ring-sky-200',
   PAID: 'bg-emerald-50 text-emerald-700 ring-emerald-200', PARTIAL: 'bg-amber-50 text-amber-700 ring-amber-200', DUE: 'bg-slate-100 text-slate-700 ring-slate-200', OVERDUE: 'bg-rose-50 text-rose-700 ring-rose-200',
   PLANNED: 'bg-sky-50 text-sky-700 ring-sky-200', RUNNING: 'bg-emerald-50 text-emerald-700 ring-emerald-200', DRAFT: 'bg-slate-100 text-slate-700 ring-slate-200', SCHEDULED: 'bg-indigo-50 text-indigo-700 ring-indigo-200',
   SUBMITTED: 'bg-sky-50 text-sky-700 ring-sky-200', UNDER_REVIEW: 'bg-indigo-50 text-indigo-700 ring-indigo-200', PENDING_APPROVAL: 'bg-amber-50 text-amber-700 ring-amber-200',
