@@ -102,6 +102,8 @@ model User {
   student            Student?        @relation("StudentUser")
   ownedLeads         Lead[]          @relation("LeadOwner")
   notifications      Notification[]
+  guardianOf         Guardian[]      @relation("GuardianUser")
+  financeStudents    Student[]       @relation("FinanceOwner")
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
 
@@ -579,6 +581,9 @@ model Student {
   batchId           String?
   batch             Batch?           @relation(fields: [batchId], references: [id])
   admissionDate     DateTime         @default(now())
+  /// Finance Staff member assigned to collection and follow-ups for this student (NULL = unassigned)
+  financeOwnerId    String?
+  financeOwner      User?            @relation("FinanceOwner", fields: [financeOwnerId], references: [id])
   chatwootContactId Int?
   lead              Lead?
   guardians         Guardian[]
@@ -646,7 +651,11 @@ model Guardian {
   phone      String
   email      String?
   occupation String?
+  /// Parent portal account for this guardian (role "parent"); NULL = contact only, no sign-in
+  userId     String?
+  user       User?   @relation("GuardianUser", fields: [userId], references: [id])
 
+  @@index([userId])
   @@map("guardians")
 }
 
@@ -748,6 +757,9 @@ model Installment {
   dueDate        DateTime
   status         String              @default("DUE") // DUE, PARTIAL, PAID, SUPERSEDED (replaced by a custom plan)
   lastReminderAt DateTime?
+  /// Fee month this installment bills ("YYYY-MM" in the academy zone). NULL on installments made before it existed.
+  feeMonth       String?
+  reminders      FeeReminder[]
   /// Set when a custom installment plan (FEE_ADJUSTMENT / RESCHEDULE) replaced the unpaid part of this installment
   supersededAt   DateTime?
   /// The approved adjustment that created this installment (NULL = generated with the original plan)
@@ -757,6 +769,37 @@ model Installment {
 
   @@index([dueDate, status])
   @@map("installments")
+}
+
+/// One fee reminder to one recipient on one channel for one installment stage. The unique key makes every
+/// reminder at-most-once (automatic run, manual send, retries and overlapping runs never duplicate it).
+model FeeReminder {
+  id            String      @id @default(cuid())
+  installmentId String
+  installment   Installment @relation(fields: [installmentId], references: [id])
+  studentId     String
+  /// BEFORE_5, BEFORE_2, DUE, OVERDUE_1, OVERDUE_8 … (automatic) or MANUAL_YYYY-MM-DD (sent by finance staff)
+  stage         String
+  channel       String // IN_APP, EMAIL, WHATSAPP
+  recipientType String // STUDENT, GUARDIAN
+  /// Student id or guardian id the reminder was for
+  recipientRef  String
+  /// Address used (user id, email or phone), shown masked in the UI
+  address       String
+  status        String      @default("QUEUED") // QUEUED, SENT, FAILED, SKIPPED
+  attempts      Int         @default(0)
+  lastError     String?
+  nextAttemptAt DateTime?
+  sentAt        DateTime?
+  trigger       String      @default("AUTO") // AUTO, MANUAL
+  sentById      String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@unique([installmentId, stage, channel, recipientRef])
+  @@index([studentId, createdAt])
+  @@index([status, nextAttemptAt])
+  @@map("fee_reminders")
 }
 
 model Invoice {
@@ -787,6 +830,8 @@ model Payment {
   recordedById   String?
   idempotencyKey String?             @unique
   gatewayRef     String?             @unique
+  /// Student balance right after this payment was posted (printed on the receipt; NULL on older payments)
+  balanceAfter   Decimal?
   allocations    PaymentAllocation[]
   createdAt      DateTime            @default(now())
 

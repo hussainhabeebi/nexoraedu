@@ -15,7 +15,7 @@ export const PERMISSIONS = {
   'reports:read': 'View & export reports', 'approvals:act': 'Act on approvals', 'audit:read': 'View audit logs',
   'whatsapp:send': 'Send WhatsApp messages (Chatwoot)', 'notifications:manage': 'Manage notification templates',
 } as const;
-export type Permission = keyof typeof PERMISSIONS | '*' | 'portal:student';
+export type Permission = keyof typeof PERMISSIONS | '*' | 'portal:student' | 'portal:parent';
 
 export const DEFAULT_ROLES: { key: string; name: string; permissions: Permission[] }[] = [
   { key: 'super_admin', name: 'Super Administrator', permissions: ['*'] },
@@ -43,6 +43,8 @@ export const DEFAULT_ROLES: { key: string; name: string; permissions: Permission
   { key: 'faculty', name: 'Faculty', permissions: ['academics:read', 'attendance:mark', 'materials:manage', 'students:read_batch', 'exams:read', 'reports:read'] },
   { key: 'exam_officer', name: 'Examination Officer', permissions: ['exams:read', 'exams:manage', 'students:read', 'reports:read', 'approvals:act', 'whatsapp:send'] },
   { key: 'student', name: 'Student', permissions: ['portal:student'] },
+  // Parent / guardian portal: fee records and receipts of linked children only (guardians.userId).
+  { key: 'parent', name: 'Parent / Guardian', permissions: ['portal:parent'] },
 ];
 
 /**
@@ -55,7 +57,7 @@ export const MFA_REQUIRED_ROLES = [...PRIVILEGED_ROLES, 'sales_manager', 'exam_o
 export const isPrivilegedRole = (key: string) => (PRIVILEGED_ROLES as readonly string[]).includes(key);
 
 /** Valid permission keys that may be stored on a role or as a user override ('*' is reserved for super_admin). */
-export const isKnownPermission = (p: string) => p in PERMISSIONS || p === 'portal:student';
+export const isKnownPermission = (p: string) => p in PERMISSIONS || p === 'portal:student' || p === 'portal:parent';
 
 export function hasPerm(perms: string[], p: string) {
   return perms.includes('*') || perms.includes(p);
