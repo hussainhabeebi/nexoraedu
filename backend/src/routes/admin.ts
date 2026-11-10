@@ -25,7 +25,7 @@ r.get('/users', can('users:read'), ah(async (req, res) => {
   const q = String(req.query.q || '');
   const role = req.query.role ? String(req.query.role) : undefined;
   const where: any = {
-    roles: role ? { some: { role: { key: role } } } : { none: { role: { key: 'student' } } },
+    roles: role ? { some: { role: { key: role } } } : { none: { role: { key: { in: ['student', 'parent'] } } } },
     ...(q && { OR: [{ name: { contains: q } }, { email: { contains: q } }, { username: { contains: q } }] }),
     ...(req.query.active && { isActive: req.query.active === 'true' }),
   };

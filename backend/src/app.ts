@@ -27,6 +27,7 @@ import webhookRoutes from './routes/webhooks';
 import dashboardRoutes from './routes/dashboard';
 import publicRoutes from './routes/public';
 import portalRoutes from './routes/portal';
+import parentRoutes from './routes/parent';
 
 /** Path without query string, so secrets in query parameters never reach access logs (LOG-02). */
 morgan.token('path', (req: any) => String(req.originalUrl || req.url).split('?')[0]);
@@ -105,6 +106,7 @@ export function createApp() {
   v1.use('/whatsapp', whatsappRoutes);
   v1.use('/dashboard', dashboardRoutes);
   v1.use('/portal', portalRoutes);
+  v1.use('/parent', parentRoutes);
   app.use('/api/v1', v1);
 
   app.use((_req, _res, next) => next(notFound('The requested resource was not found.')));

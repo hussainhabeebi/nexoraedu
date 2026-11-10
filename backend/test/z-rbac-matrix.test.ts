@@ -17,9 +17,9 @@ import fs from 'fs';
 import path from 'path';
 import { app, as, makeStudent, makeUser, prisma, sessionFor } from './helpers';
 
-type Role = 'sa' | 'mgmt' | 'admin' | 'sales' | 'couns' | 'finmgr' | 'finstaff' | 'acad' | 'fac' | 'exam' | 'student';
-const ALL: Role[] = ['sa', 'mgmt', 'admin', 'sales', 'couns', 'finmgr', 'finstaff', 'acad', 'fac', 'exam', 'student'];
-const STAFF = ALL.filter((r) => r !== 'student');
+type Role = 'sa' | 'mgmt' | 'admin' | 'sales' | 'couns' | 'finmgr' | 'finstaff' | 'acad' | 'fac' | 'exam' | 'student' | 'parent';
+const ALL: Role[] = ['sa', 'mgmt', 'admin', 'sales', 'couns', 'finmgr', 'finstaff', 'acad', 'fac', 'exam', 'student', 'parent'];
+const STAFF = ALL.filter((r) => r !== 'student' && r !== 'parent');
 const PUBLIC = 'PUBLIC' as const;
 type Exp = Role[] | typeof PUBLIC;
 
@@ -46,6 +46,7 @@ const EXM_M: Role[] = ['sa', 'exam'];
 const APPROVERS: Role[] = ['sa', 'mgmt', 'sales', 'finmgr', 'acad', 'exam'];
 const WA: Role[] = ['sa', 'admin', 'sales', 'couns', 'finmgr', 'finstaff', 'acad', 'exam'];
 const STUDENT: Role[] = ['student'];
+const PARENT: Role[] = ['sa', 'parent']; // Super Admin oversight: sees no children unless linked
 
 const MATRIX: Record<string, Exp> = {
   // ── Sign-in & self-service ──
@@ -124,13 +125,16 @@ const MATRIX: Record<string, Exp> = {
   'GET /portal/me': STUDENT, 'GET /portal/enrollments': STUDENT, 'GET /portal/timetable': STUDENT, 'GET /portal/attendance': STUDENT, 'GET /portal/fees': STUDENT,
   'GET /portal/payments/:id/receipt.pdf': STUDENT, 'GET /portal/materials': STUDENT, 'GET /portal/assignments': STUDENT, 'POST /portal/assignments/:id/submit': STUDENT,
   'GET /portal/results': STUDENT, 'GET /portal/certificates': STUDENT, 'GET /portal/certificates/:id/pdf': STUDENT, 'GET /portal/exams': STUDENT,
+  // ── Parent portal (linked children's fees and receipts only) ──
+  'GET /parent/children': PARENT, 'GET /parent/children/:studentId/fees': PARENT, 'GET /parent/children/:studentId/payments/:paymentId/receipt.pdf': PARENT,
+  'POST /students/:id/guardians/:gid/parent-account': STU_W, 'DELETE /students/:id/guardians/:gid/parent-account': STU_W,
   'POST /portal/exams/:id/start': STUDENT, 'PUT /portal/attempts/:id/answers': STUDENT, 'POST /portal/attempts/:id/event': STUDENT, 'POST /portal/attempts/:id/submit': STUDENT,
 };
 
 /** Route inventory read from source: mount prefixes from app.ts, handlers from each router file. */
 function inventory(): string[] {
   const src = path.resolve(__dirname, '../src');
-  const mounts: Record<string, string> = { auth: '/auth', public: '/public', webhooks: '/webhooks', admin: '/admin', academics: '/academics', crm: '/crm', students: '/students', finance: '/finance', exams: '/exams', approvals: '/approvals', notifications: '/notifications', whatsapp: '/whatsapp', dashboard: '/dashboard', portal: '/portal' };
+  const mounts: Record<string, string> = { auth: '/auth', public: '/public', webhooks: '/webhooks', admin: '/admin', academics: '/academics', crm: '/crm', students: '/students', finance: '/finance', exams: '/exams', approvals: '/approvals', notifications: '/notifications', whatsapp: '/whatsapp', dashboard: '/dashboard', portal: '/portal', parent: '/parent' };
   const out: string[] = [];
   for (const f of fs.readdirSync(path.join(src, 'routes'))) {
     const name = f.replace(/\.ts$/, '');
@@ -150,9 +154,10 @@ const tokens = {} as Record<Role, string>;
 beforeAll(async () => {
   const sa = await makeUser(['super_admin']);
   const st = await makeUser(['student']);
+  const parent = await makeUser(['parent']);
   const rec = await makeStudent({});
   await prisma.student.update({ where: { id: rec.id }, data: { userId: st.id } });
-  const map: Record<Role, string> = { sa: sa.username, mgmt: 'director', admin: 'office', sales: 'salesmgr', couns: 'counselor1', finmgr: 'finmgr', finstaff: 'accounts', acad: 'acadmgr', fac: 'faculty1', exam: 'examofficer', student: st.username };
+  const map: Record<Role, string> = { sa: sa.username, mgmt: 'director', admin: 'office', sales: 'salesmgr', couns: 'counselor1', finmgr: 'finmgr', finstaff: 'accounts', acad: 'acadmgr', fac: 'faculty1', exam: 'examofficer', student: st.username, parent: parent.username };
   for (const r of ALL) tokens[r] = await sessionFor(map[r]);
 });
 

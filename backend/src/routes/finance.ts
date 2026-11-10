@@ -11,7 +11,7 @@ import { money, toCsv } from '../lib/util';
 import { dayDiff, endOfDayUtc, formatDate, toCalendarDate } from '../lib/caldate';
 import { reconcile } from '../services/reconciliation';
 import { createApproval } from '../services/approvals';
-import { ACTIVE_REFUND_STATUSES, assertCancellationKeepsRefundsCovered, courseFee, createFeePlan, installmentFeeMonth, ledger, lockStudentAccount, recordPayment, studentBalance } from '../services/finance';
+import { ACTIVE_REFUND_STATUSES, assertCancellationKeepsRefundsCovered, courseFee, createFeePlan, feeMonthLabel, installmentFeeMonth, ledger, lockStudentAccount, recordPayment, studentBalance } from '../services/finance';
 import { earlierPlansForCourse, feeEnrollmentChain, requestFeeAdjustment, requestRebill } from '../services/feeAdjustments';
 import { notifyLater } from '../services/notify';
 import { feeMonthLedger, monthSummary } from '../services/feeSummary';
@@ -131,36 +131,67 @@ r.get('/payments', can('finance:read'), ah(async (req, res) => {
   res.json({ items, total, page, pageSize, sum: Number(sum._sum.amount ?? 0) });
 }));
 
+/**
+ * Individual PDF receipt: academy branding and contact details, receipt number, student name and ID, fee month(s)
+ * paid, payment date, amount, payment method and the balance remaining right after this payment (frozen when the
+ * payment was posted; older receipts show the current balance, labelled as such). Cancelled receipts are marked
+ * CANCELLED in the title and across the page; a pending cancellation is noted.
+ */
 export async function receiptPdf(paymentId: string, out: NodeJS.WritableStream) {
   const p = await prisma.payment.findUnique({ where: { id: paymentId }, include: { student: { include: { course: true, batch: true } }, allocations: { include: { installment: true } } } });
   if (!p) throw notFound('Payment not found');
   const s = await getSettings();
-  const bal = await studentBalance(p.studentId);
+  const tz = s.academy.timeZone;
+  const frozen = p.balanceAfter != null;
+  const bal = frozen ? Number(p.balanceAfter) : await studentBalance(p.studentId);
+  const cur = (n: number) => `${s.academy.currency} ${money(n).toFixed(2)}`;
   const doc = new PDFDocument({ size: 'A5', margin: 36 });
   doc.pipe(out);
-  doc.fillColor('#4338ca').fontSize(18).text(s.academy.name, { continued: false });
+  doc.rect(0, 0, doc.page.width, 6).fill('#4338ca');
+  doc.fillColor('#4338ca').fontSize(18).text(s.academy.name, 36, 24);
+  if (s.academy.tagline) doc.fillColor('#6366f1').fontSize(8).text(s.academy.tagline);
   doc.fillColor('#555').fontSize(8).text(`${s.academy.address} · ${s.academy.phone} · ${s.academy.email}`);
   doc.moveDown();
-  doc.fillColor('#111').fontSize(13).text(p.status === 'CANCELLED' ? 'FEE RECEIPT — CANCELLED' : 'FEE RECEIPT', { align: 'center' });
-  doc.moveDown(0.5).fontSize(9);
-  const row = (k: string, v: string) => doc.font('Helvetica-Bold').text(k, { continued: true, width: 120 }).font('Helvetica').text(`  ${v}`);
+  const title = p.status === 'CANCELLED' ? 'FEE RECEIPT — CANCELLED' : 'FEE RECEIPT';
+  doc.fillColor(p.status === 'CANCELLED' ? '#b91c1c' : '#111').fontSize(13).text(title, { align: 'center' });
+  if (p.status === 'CANCEL_REQUESTED') doc.fillColor('#b45309').fontSize(8).text('Cancellation requested — pending approval', { align: 'center' });
+  doc.moveDown(0.5).fillColor('#111').fontSize(9);
+  // Label and value on one line, wrapping only at the page margin.
+  const row = (k: string, v: string) => doc.font('Helvetica-Bold').text(k, { continued: true }).font('Helvetica').text(`  ${v}`);
+  const months = [...new Set(p.allocations.map((a) => feeMonthLabel(installmentFeeMonth(a.installment, tz))))];
   row('Receipt No:', p.receiptNumber);
-  row('Date:', formatDate(p.paidAt, (await getSettings()).academy.timeZone));
-  row('Student:', `${p.student.fullName} (${p.student.studentCode})`);
+  row('Payment date:', formatDate(p.paidAt, tz));
+  row('Student:', p.student.fullName);
+  row('Student ID:', p.student.studentCode);
   row('Course / Batch:', `${p.student.course.name}${p.student.batch ? ' / ' + p.student.batch.code : ''}`);
-  row('Payment mode:', p.mode + (p.reference ? ` — Ref ${p.reference}` : ''));
+  if (months.length) row(months.length > 1 ? 'Fee months:' : 'Fee month:', months.join(', '));
+  row('Payment method:', p.mode.replace(/_/g, ' ') + (p.reference ? ` — Ref ${p.reference}` : ''));
   if (p.payer) row('Paid by:', p.payer);
   doc.moveDown();
-  for (const a of p.allocations) row(`Installment #${a.installment.seq}:`, `${s.academy.currency} ${money(a.amount).toFixed(2)}`);
-  doc.moveDown(0.5).fontSize(12).font('Helvetica-Bold').text(`Amount received: ${s.academy.currency} ${money(p.amount).toFixed(2)}`);
-  doc.fontSize(9).font('Helvetica').text(`Balance outstanding: ${s.academy.currency} ${bal.toFixed(2)}`);
-  doc.moveDown(2).fillColor('#888').fontSize(7).text('This is a computer-generated receipt and does not require a signature.', { align: 'center' });
+  for (const a of p.allocations) row(`${feeMonthLabel(installmentFeeMonth(a.installment, tz))} (installment #${a.installment.seq}):`, cur(Number(a.amount)));
+  doc.moveDown(0.5).fontSize(12).font('Helvetica-Bold').text(`Amount received: ${cur(Number(p.amount))}`);
+  doc.fontSize(9).font('Helvetica').text(frozen ? `Remaining balance after this payment: ${cur(bal)}` : `Current balance outstanding: ${cur(bal)}`);
+  if (p.status === 'CANCELLED') {
+    doc.save().rotate(-30, { origin: [doc.page.width / 2, doc.page.height / 2] }).fillColor('#dc2626').opacity(0.18).fontSize(64).font('Helvetica-Bold')
+      .text('CANCELLED', 0, doc.page.height / 2 - 32, { width: doc.page.width, align: 'center' }).restore();
+    doc.opacity(1);
+  }
+  doc.moveDown(2).fillColor('#888').fontSize(7).font('Helvetica').text('This is a computer-generated receipt and does not require a signature.', { align: 'center' });
   doc.end();
 }
 
+/** Receipt downloads are audit-logged (who, which receipt, through which portal). */
+export async function auditReceiptDownload(req: Request, p: { id: string; receiptNumber: string; studentId: string; status: string }, via: 'staff' | 'student' | 'parent') {
+  await audit(prisma, req, 'DOWNLOAD', 'receipt', p.id, null, { receiptNumber: p.receiptNumber, studentId: p.studentId, status: p.status, via });
+}
+
 r.get('/payments/:id/receipt.pdf', can('finance:read'), ah(async (req, res) => {
+  const p = await prisma.payment.findUnique({ where: { id: req.params.id }, select: { id: true, receiptNumber: true, studentId: true, status: true } });
+  if (!p) throw notFound('Payment not found');
+  await auditReceiptDownload(req, p, 'staff');
   res.setHeader('Content-Type', 'application/pdf');
-  await receiptPdf(req.params.id, res);
+  res.setHeader('Content-Disposition', `inline; filename="${p.receiptNumber}.pdf"`);
+  await receiptPdf(p.id, res);
 }));
 
 // Staff cannot edit/delete a posted payment — only request cancellation (§12 rules)

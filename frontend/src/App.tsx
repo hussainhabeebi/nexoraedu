@@ -60,8 +60,9 @@ const STakeExam = L(() => import('./pages/student/TakeExam'));
 const SResults = L(() => import('./pages/student/Results'));
 const SLearning = L(() => import('./pages/student/Learning'));
 const SProfile = L(() => import('./pages/student/Profile'));
+const ParentHome = L(() => import('./pages/parent/ParentHome'));
 
-function RequireAuth({ children, student, perm, anyPortal }: { children: ReactNode; student?: boolean; perm?: string[]; anyPortal?: boolean }) {
+function RequireAuth({ children, student, parent, perm, anyPortal }: { children: ReactNode; student?: boolean; parent?: boolean; perm?: string[]; anyPortal?: boolean }) {
   const { user, can, ready } = useAuth();
   const loc = useLocation();
   if (!ready) return <div className="flex min-h-screen items-center justify-center"><Spinner className="h-6 w-6" /></div>;
@@ -70,6 +71,11 @@ function RequireAuth({ children, student, perm, anyPortal }: { children: ReactNo
   const step = pendingStep(user);
   if (step && loc.pathname !== step) return <Navigate to={step} replace />;
   if (anyPortal) return <>{children}</>;
+  // Parents (guardian accounts) only ever see the parent portal.
+  const isParent = user.roles.includes('parent') && user.roles.length === 1;
+  if (parent && !isParent) return <Navigate to="/staff" replace />;
+  if (!parent && isParent) return <Navigate to="/parent" replace />;
+  if (parent) return <>{children}</>;
   const isStudent = user.roles.includes('student') && user.roles.length === 1;
   if (student && !isStudent) return <Navigate to="/staff" replace />;
   if (!student && isStudent) return <Navigate to="/student" replace />;
@@ -143,6 +149,7 @@ export default function App() {
           <Route path="profile" element={<SProfile />} />
         </Route>
         <Route path="student/exam/:id" element={<RequireAuth student><STakeExam /></RequireAuth>} />
+        <Route path="parent" element={<RequireAuth parent><ParentHome /></RequireAuth>} />
         <Route path="*" element={<NotFound />} />
       </Routes>
     </Suspense>

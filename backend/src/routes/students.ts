@@ -4,8 +4,8 @@ import path from 'path';
 import { z } from 'zod';
 import type { Prisma, StudentStatus } from '#prisma';
 import { prisma } from '../lib/prisma';
-import { ah, badRequest, forbidden, notFound, paging } from '../lib/http';
-import { can, userCan } from '../lib/auth';
+import { ah, badRequest, conflict, forbidden, notFound, paging } from '../lib/http';
+import { bumpAuthVersion, can, revokeUserSessions, userCan } from '../lib/auth';
 import { canAccessDocument, studentScope } from '../lib/policy';
 import { audit } from '../lib/audit';
 import { nextNumber } from '../lib/sequence';
@@ -19,7 +19,10 @@ import { createApproval } from '../services/approvals';
 import { studentBalance } from '../services/finance';
 import { studentAttendancePct } from './academics';
 import { cancelEnrollment, syncEnrollmentWithStudentStatus } from '../services/enrollments';
-import { atomic } from '../lib/db';
+import { atomic, type Tx } from '../lib/db';
+import { UNUSABLE_PASSWORD } from '../lib/password';
+import { issueActivationLink } from '../lib/activation';
+import { notifyLater } from '../services/notify';
 
 const r = Router();
 
@@ -247,6 +250,61 @@ r.delete('/:id/guardians/:gid', can('students:manage'), ah(async (req, res) => {
     if (!g) throw notFound('Guardian not found');
     await tx.guardian.delete({ where: { id: g.id } });
     await audit(tx, req, 'DELETE', 'guardian', g.id, g, null);
+    if (g.userId) await closeParentAccountIfUnlinked(tx, req, g.userId, g.id);
+  });
+  res.json({ ok: true });
+}));
+
+// ── Parent / guardian portal accounts (fees and receipts of linked children only) ──
+
+/** A parent account whose last guardian link is removed is deactivated and signed out. */
+async function closeParentAccountIfUnlinked(tx: Tx, req: Request, userId: string, removedGuardianId: string) {
+  const left = await tx.guardian.count({ where: { userId, id: { not: removedGuardianId } } });
+  if (left > 0) return;
+  await tx.user.update({ where: { id: userId }, data: { isActive: false } });
+  await revokeUserSessions(tx, userId, 'PARENT_UNLINKED');
+  await bumpAuthVersion(tx, userId);
+  await audit(tx, req, 'DEACTIVATE', 'user', userId, { isActive: true }, { isActive: false, reason: 'No linked children' });
+}
+
+// Create (or link an existing parent account to) a guardian. Needs the guardian's email; an activation link is sent.
+r.post('/:id/guardians/:gid/parent-account', can('students:manage'), ah(async (req, res) => {
+  const g = await prisma.guardian.findFirst({ where: { id: req.params.gid, studentId: req.params.id }, include: { student: { select: { fullName: true } } } });
+  if (!g) throw notFound('Guardian not found');
+  if (g.userId) throw badRequest('This guardian already has a parent portal account.');
+  const email = normalizeEmail(g.email);
+  if (!email) throw badRequest("Add the guardian's email address first; it is the parent's sign-in.");
+  const role = await prisma.role.findUniqueOrThrow({ where: { key: 'parent' } });
+  const existing = await prisma.user.findFirst({ where: { email }, include: { roles: { include: { role: true } } } });
+  if (existing && !(existing.roles.length === 1 && existing.roles[0].role.key === 'parent')) {
+    throw conflict('This email already belongs to another account. Use a different email for the parent portal.');
+  }
+  let username = `p${(normalizePhone(g.phone) ?? g.phone).replace(/\D/g, '').slice(-10)}`;
+  if (!existing) {
+    for (let n = 2; await prisma.user.count({ where: { username } }); n++) username = `${username.replace(/-\d+$/, '')}-${n}`;
+  }
+  const out = await atomic(async (tx) => {
+    const u = existing ?? (await tx.user.create({ data: { name: g.name, email, username, phone: g.phone, passwordHash: UNUSABLE_PASSWORD, mustChangePassword: false, roles: { create: [{ roleId: role.id }] } } }));
+    if (existing && !existing.isActive) await tx.user.update({ where: { id: existing.id }, data: { isActive: true } });
+    const linked = await tx.guardian.updateMany({ where: { id: g.id, userId: null }, data: { userId: u.id } });
+    if (linked.count !== 1) throw badRequest('This guardian already has a parent portal account.');
+    const act = existing?.passwordHash.startsWith('$2') ? null : await issueActivationLink(tx, u.id);
+    await audit(tx, req, existing ? 'LINK_PARENT' : 'CREATE_PARENT', 'guardian', g.id, null, { userId: u.id, studentId: g.studentId, newAccount: !existing });
+    return { u, act };
+  });
+  if (out.act) notifyLater('parent.welcome', { userId: out.u.id, name: out.u.name, email: out.u.email, phone: out.u.phone }, { name: out.u.name, username: out.u.username, student: g.student.fullName, link: out.act.link, hours: out.act.hours }, { channels: ['EMAIL', 'WHATSAPP'], sensitive: true });
+  res.status(existing ? 200 : 201).json({ userId: out.u.id, username: out.u.username, linkedExisting: !!existing, activationSent: !!out.act, activationHours: out.act?.hours });
+}));
+
+// Remove a guardian's portal access to this student (the account is deactivated when no children remain).
+r.delete('/:id/guardians/:gid/parent-account', can('students:manage'), ah(async (req, res) => {
+  await atomic(async (tx) => {
+    const g = await tx.guardian.findFirst({ where: { id: req.params.gid, studentId: req.params.id } });
+    if (!g) throw notFound('Guardian not found');
+    if (!g.userId) throw badRequest('This guardian has no parent portal account.');
+    await tx.guardian.update({ where: { id: g.id }, data: { userId: null } });
+    await audit(tx, req, 'UNLINK_PARENT', 'guardian', g.id, { userId: g.userId }, { userId: null });
+    await closeParentAccountIfUnlinked(tx, req, g.userId, g.id);
   });
   res.json({ ok: true });
 }));

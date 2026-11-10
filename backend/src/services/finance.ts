@@ -136,10 +136,13 @@ export async function recordPayment(
   const insts = await outstandingInstallments(tx, p.studentId);
   const due = money(insts.reduce((s, i) => s + Number(i.amount) - Number(i.paidAmount), 0));
   if (amount > due + 0.001) throw conflict(`Amount exceeds the outstanding balance of ${due.toFixed(2)}.`);
+  // Balance printed on the receipt: the account balance right after this payment (read before any write here,
+  // with the account locked, so it cannot move underneath us). Frozen on the payment row (DB trigger).
+  const balanceAfter = money((await studentBalance(p.studentId, tx)) - amount);
   const s = await getSettings();
   const receiptNumber = await nextNumber('receipt:{year}', s.ids.receipt, tx);
   const payment = await tx.payment.create({
-    data: { receiptNumber, studentId: p.studentId, amount, mode: p.mode, reference: p.reference, payer: p.payer, paidAt: p.paidAt ?? new Date(), idempotencyKey: p.idempotencyKey, gatewayRef: p.gatewayRef, recordedById: p.userId },
+    data: { receiptNumber, studentId: p.studentId, amount, mode: p.mode, reference: p.reference, payer: p.payer, paidAt: p.paidAt ?? new Date(), idempotencyKey: p.idempotencyKey, gatewayRef: p.gatewayRef, recordedById: p.userId, balanceAfter },
   });
   let left = amount;
   for (const i of insts) {
