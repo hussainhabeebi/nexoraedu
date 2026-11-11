@@ -68,7 +68,7 @@ const MATRIX: Record<string, Exp> = {
   'GET /admin/departments': USERS_R, 'POST /admin/departments': USERS_W, 'PATCH /admin/departments/:id': USERS_W, 'DELETE /admin/departments/:id': USERS_W,
   'GET /admin/masters': ALL, // LOOKUP (dropdowns)
   'POST /admin/masters': USERS_W, 'PATCH /admin/masters/:id': USERS_W,
-  'GET /admin/settings': USERS_W, 'PUT /admin/settings/:key': SA,
+  'GET /admin/settings': USERS_W, 'GET /admin/email': SA, 'POST /admin/email/test': SA, 'PUT /admin/settings/:key': SA,
   'GET /admin/workflows': APPROVERS, 'PUT /admin/workflows/:type': SA,
   'GET /admin/templates': USERS_W, 'PATCH /admin/templates/:id': USERS_W,
   'GET /admin/audit-logs': AUDIT, 'GET /admin/login-logs': AUDIT, 'GET /admin/notification-logs': USERS_R, 'GET /admin/integration-logs': AUDIT,

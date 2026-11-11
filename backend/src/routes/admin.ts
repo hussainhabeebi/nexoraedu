@@ -12,7 +12,8 @@ import { MIN_LENGTH_FLOOR, UNUSABLE_PASSWORD } from '../lib/password';
 import { issueActivationLink, issueResetLink } from '../lib/activation';
 import { normalizeEmail } from '../lib/util';
 import { isValidTimeZone } from '../lib/caldate';
-import { notifyLater } from '../services/notify';
+import { config } from '../config';
+import { emailProvider, notifyLater, sendEmail } from '../services/notify';
 import { APPROVAL_TYPES, assertWorkflowLevels, createApproval, MANDATORY_APPROVAL_TYPES } from '../services/approvals';
 import { atomic, type Tx } from '../lib/db';
 import { DELETE_SPECS, deleteIfUnused } from '../services/setupDelete';
@@ -329,6 +330,23 @@ r.patch('/masters/:id', can('masters:manage'), ah(async (req, res) => {
 }));
 
 // ── System settings (ADM-09) ──
+// Email: which provider is configured (never the key), and a test send to an address of the admin's choice.
+r.get('/email', can('settings:manage'), ah(async (_req, res) => {
+  res.json({ provider: emailProvider(), from: config.smtp.from });
+}));
+r.post('/email/test', can('settings:manage'), ah(async (req, res) => {
+  const { to } = z.object({ to: z.string().email() }).parse(req.body);
+  if (!emailProvider()) throw badRequest('Email is not configured: add the RESEND_API_KEY secret to this Worker in Cloudflare.');
+  try {
+    const r = await sendEmail(to, 'Nexora test email', 'This is a test email from the Nexora Academy portal. Email sending is working.');
+    await audit(prisma, req, 'EMAIL_TEST', 'integration', 'email', null, { to, ok: true });
+    res.json({ ok: true, id: r.id });
+  } catch (e: any) {
+    await audit(prisma, req, 'EMAIL_TEST', 'integration', 'email', null, { to, ok: false, error: String(e?.message ?? e).slice(0, 200) });
+    res.json({ ok: false, error: String(e?.message ?? e).slice(0, 300) });
+  }
+}));
+
 r.get('/settings', can('settings:manage', 'masters:manage'), ah(async (_req, res) => res.json(await getSettings())));
 r.put('/settings/:key', can('settings:manage'), ah(async (req, res) => {
   const key = req.params.key as keyof typeof DEFAULT_SETTINGS;
