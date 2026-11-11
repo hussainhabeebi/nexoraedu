@@ -144,7 +144,8 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     const s = await prisma.session.findUnique({ where: { id: p.sid }, include: { user: { select: { authVersion: true, isActive: true } } } });
     const now = Date.now();
     const st = await getSettings();
-    const idleMs = Math.max(1, st.security.sessionTimeoutMin) * 60_000;
+    // 0 = no inactivity sign-out (the session still ends at its absolute lifetime, SESSION_MAX_HOURS).
+    const idleMs = st.security.sessionTimeoutMin > 0 ? st.security.sessionTimeoutMin * 60_000 : Infinity;
     if (!s || s.userId !== p.sub || s.revokedAt || s.expiresAt.getTime() < now) throw new HttpError(401, 'Your session has expired. Please sign in again.', 'SESSION_ENDED');
     if (now - s.lastSeenAt.getTime() > idleMs) {
       await prisma.session.updateMany({ where: { familyId: s.familyId, revokedAt: null }, data: { revokedAt: new Date(), revokedReason: 'IDLE_TIMEOUT' } });

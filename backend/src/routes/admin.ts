@@ -352,7 +352,7 @@ r.put('/settings/:key', can('settings:manage'), ah(async (req, res) => {
   }
   if (key === 'security') {
     // Security floors from the SRS cannot be weakened from the UI (SEC-01, SEC-04, SEC-05).
-    const sec = z.object({ sessionTimeoutMin: z.number().int().min(5).max(240), passwordMinLength: z.number().int().min(MIN_LENGTH_FLOOR).max(64), maxFailedLogins: z.number().int().min(3).max(10), lockMinutes: z.number().int().min(5).max(1440), activationHours: z.number().int().min(1).max(168), mfaRequired: z.boolean().default(false) }).parse(value);
+    const sec = z.object({ sessionTimeoutMin: z.number().int().min(0).max(240).refine((n) => n === 0 || n >= 5, 'Use 0 (never) or 5–240 minutes'), passwordMinLength: z.number().int().min(MIN_LENGTH_FLOOR).max(64), maxFailedLogins: z.number().int().min(3).max(10), lockMinutes: z.number().int().min(5).max(1440), activationHours: z.number().int().min(1).max(168), mfaRequired: z.boolean().default(false) }).parse(value);
     // Turning the sign-in authenticator code on or off is a Super Administrator decision (audit-logged below).
     if (sec.mfaRequired !== (before as any).mfaRequired && !req.user!.roles.includes('super_admin')) throw forbidden('Only a Super Administrator can change the authenticator-code requirement.');
     Object.assign(value, sec);

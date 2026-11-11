@@ -6,7 +6,7 @@ import { useAuth } from '@/lib/auth';
 import { useGet } from '@/lib/hooks';
 import { d, inr, label } from '@/lib/format';
 import Logo from '@/components/Logo';
-import { NotificationBell, useIdleLogout } from '@/components/StaffLayout';
+import { NotificationBell } from '@/components/StaffLayout';
 import { FeeMonthsTable } from '@/components/FeeMonths';
 import { Avatar, Badge, Card, Empty, PageHeader, PageLoader, Stat, cx } from '@/components/ui';
 
@@ -47,7 +47,6 @@ function ChildFees({ studentId }: { studentId: string }) {
 export default function ParentHome() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
-  useIdleLogout(30, () => { logout(); nav('/login', { state: { reason: 'idle' } }); });
   const { data, isLoading } = useGet<any>('/parent/children');
   const [sel, setSel] = useState('');
   const kids = data?.items ?? [];

@@ -2,7 +2,7 @@ import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { BookOpen, CalendarDays, ClipboardCheck, Home, LogOut, Trophy, User, Wallet } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import Logo from './Logo';
-import { NotificationBell, useIdleLogout } from './StaffLayout';
+import { NotificationBell } from './StaffLayout';
 import { Avatar, cx } from './ui';
 
 const NAV = [
@@ -18,7 +18,6 @@ const NAV = [
 export default function StudentLayout() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
-  useIdleLogout(30, () => { logout(); nav('/student/login', { state: { reason: 'idle' } }); });
   return (
     <div className="min-h-screen pb-20 md:pb-0">
       <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur">

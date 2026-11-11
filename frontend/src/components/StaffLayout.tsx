@@ -59,22 +59,6 @@ const GROUPS: { title: string; items: Item[] }[] = [
   },
 ];
 
-export function useIdleLogout(minutes: number, onIdle: () => void) {
-  useEffect(() => {
-    let t: ReturnType<typeof setTimeout>;
-    const reset = () => {
-      clearTimeout(t);
-      t = setTimeout(onIdle, minutes * 60_000);
-    };
-    const ev = ['mousemove', 'keydown', 'click', 'touchstart', 'scroll'];
-    ev.forEach((e) => window.addEventListener(e, reset, { passive: true }));
-    reset();
-    return () => {
-      clearTimeout(t);
-      ev.forEach((e) => window.removeEventListener(e, reset));
-    };
-  }, [minutes, onIdle]);
-}
 
 export function NotificationBell({ base }: { base: string }) {
   const [open, setOpen] = useState(false);
@@ -137,10 +121,6 @@ export default function StaffLayout() {
   const nav = useNavigate();
   const loc = useLocation();
   useEffect(() => setOpen(false), [loc.pathname]);
-  useIdleLogout(30, () => {
-    logout();
-    nav('/login', { state: { reason: 'idle' } });
-  });
 
   const groups = GROUPS.map((g) => ({ ...g, items: g.items.filter((i) => !i.perm || can(...i.perm)) })).filter((g) => g.items.length);
   const sidebar = (
