@@ -15,10 +15,11 @@ export const DEFAULT_SETTINGS = {
   },
   ids: { student: 'NXA-{YYYY}-#####', lead: 'LD-{YY}{MM}-#####', application: 'APP-{YYYY}-#####', invoice: 'INV-{YYYY}-######', receipt: 'RCP-{YYYY}-######', certificate: 'NXC-{YYYY}-#####' },
   /**
+   * sessionTimeoutMin: sign out after this many idle minutes; 0 = never (owner decision 2026-11-11, default).
    * mfaRequired: ask privileged roles for an authenticator code at every sign-in (and make them enrol one).
    * Off by default (owner decision 2026-11-10); a Super Administrator can switch it on in Settings → Security.
    */
-  security: { sessionTimeoutMin: 30, passwordMinLength: 10, maxFailedLogins: 5, lockMinutes: 15, activationHours: 72, mfaRequired: false },
+  security: { sessionTimeoutMin: 0, passwordMinLength: 10, maxFailedLogins: 5, lockMinutes: 15, activationHours: 72, mfaRequired: false },
   crm: { autoAssign: 'round_robin', inactivityDays: 3 },
   /**
    * dueDayOfMonth: every NEW fee plan's installments fall due on this day of each month (academy zone), the first

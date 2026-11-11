@@ -16,7 +16,7 @@ export default async function setup() {
     const { seedDemo } = await import('../src/seed/demo');
     const { DEFAULT_SETTINGS } = await import('../src/lib/settings');
     // The suite exercises the strict mode (authenticator code required); 21-mfa-setting tests the default (off).
-    await (prisma as any).setting.create({ data: { key: 'security', value: { ...DEFAULT_SETTINGS.security, mfaRequired: true } } });
+    await (prisma as any).setting.create({ data: { key: 'security', value: { ...DEFAULT_SETTINGS.security, mfaRequired: true, sessionTimeoutMin: 30 } } });
     // Older suites were written for the legacy due-date policy (due on the start day); 74-fee-due-day covers the
     // production default (the 10th of each month) by switching it on.
     await (prisma as any).setting.create({ data: { key: 'finance', value: { ...DEFAULT_SETTINGS.finance, dueDayOfMonth: null } } });

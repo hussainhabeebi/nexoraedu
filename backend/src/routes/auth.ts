@@ -228,7 +228,7 @@ r.post('/refresh', ...refreshLimiters, ah(async (req, res) => {
     throw expired();
   }
   const st = await getSettings();
-  if (s.expiresAt < new Date() || Date.now() - s.lastSeenAt.getTime() > st.security.sessionTimeoutMin * 60_000) {
+  if (s.expiresAt < new Date() || (st.security.sessionTimeoutMin > 0 && Date.now() - s.lastSeenAt.getTime() > st.security.sessionTimeoutMin * 60_000)) {
     await prisma.session.update({ where: { id: s.id }, data: { revokedAt: new Date(), revokedReason: 'IDLE_TIMEOUT' } });
     throw expired();
   }

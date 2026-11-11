@@ -143,6 +143,23 @@ describe('SEC-T21/T22 revocation and idle timeout', () => {
     expect(r.body.error.code).toBe('SESSION_IDLE');
   });
 
+  it('with the inactivity sign-out off (0, the default), an idle session keeps working; the absolute lifetime still applies', async () => {
+    const sa = await sessionFor((await makeUser(['super_admin'])).username);
+    const cur = (await request(app).get('/api/v1/admin/settings').set(as(sa))).body.security;
+    expect((await request(app).put('/api/v1/admin/settings/security').set(as(sa)).send({ ...cur, sessionTimeoutMin: 3 })).status).toBe(422);
+    expect((await request(app).put('/api/v1/admin/settings/security').set(as(sa)).send({ ...cur, sessionTimeoutMin: 0 })).status).toBe(200);
+    try {
+      const t = await sessionFor('counselor2');
+      const s = await prisma.session.findFirstOrThrow({ where: { user: { username: 'counselor2' } }, orderBy: { createdAt: 'desc' } });
+      await prisma.session.update({ where: { id: s.id }, data: { lastSeenAt: new Date(Date.now() - 6 * 3600_000) } });
+      expect((await request(app).get('/api/v1/crm/leads').set(as(t))).status).toBe(200);
+      await prisma.session.update({ where: { id: s.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+      expect((await request(app).get('/api/v1/crm/leads').set(as(t))).status).toBe(401);
+    } finally {
+      await request(app).put('/api/v1/admin/settings/security').set(as(sa)).send({ ...cur, sessionTimeoutMin: 30 });
+    }
+  });
+
   it('users can list and end their own sessions', async () => {
     const t1 = await login2('counselor1');
     const t2 = await login2('counselor1');
