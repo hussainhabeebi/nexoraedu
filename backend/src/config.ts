@@ -57,7 +57,8 @@ export const config = {
   },
   smtp: {
     host: process.env.SMTP_HOST || '',
-    from: process.env.MAIL_FROM || 'Nexora Academy <no-reply@nexoraed.com>',
+    // The sender must be on the domain verified in Resend (mail.nexoraed.com).
+    from: process.env.MAIL_FROM || 'Nexora Academy <no-reply@mail.nexoraed.com>',
   },
 };
 

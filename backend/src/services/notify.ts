@@ -21,6 +21,30 @@ export interface Recipient {
   conversationId?: number | null;
 }
 
+/**
+ * Email delivery. Resend's HTTPS API (RESEND_API_KEY secret) is used when configured — it works on Cloudflare
+ * Workers without raw SMTP sockets. SMTP (SMTP_HOST …) remains as a fallback. Neither → emails are SKIPPED.
+ */
+export const emailProvider = () => (process.env.RESEND_API_KEY ? 'resend' : config.smtp.host ? 'smtp' : null);
+
+export async function sendEmail(to: string, subject: string, text: string): Promise<{ id: string }> {
+  const key = process.env.RESEND_API_KEY;
+  if (key) {
+    const r = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: config.smtp.from, to: [to], subject, text }),
+    });
+    const j: any = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(`Resend ${r.status}: ${j?.message ?? j?.name ?? 'request failed'}`);
+    return { id: `resend:${j.id}` };
+  }
+  const m = mailer();
+  if (!m) throw Object.assign(new Error('Email is not configured'), { code: 'EMAIL_NOT_CONFIGURED' });
+  const info = await m.sendMail({ from: config.smtp.from, to, subject, text });
+  return { id: info.messageId };
+}
+
 let transport: Transporter | null = null;
 function mailer() {
   if (!config.smtp.host) return null;
@@ -59,14 +83,13 @@ export async function notify(templateKey: string, to: Recipient, vars: Record<st
           results[ch] = { status: 'NO_ADDRESS' };
           continue;
         }
-        const m = mailer();
-        if (!m) {
-          await log(ch, to.email, templateKey, logBody, 'SKIPPED', 'SMTP not configured');
-          results[ch] = { status: 'SKIPPED', error: 'SMTP not configured' };
+        if (!emailProvider()) {
+          await log(ch, to.email, templateKey, logBody, 'SKIPPED', 'Email not configured');
+          results[ch] = { status: 'SKIPPED', error: 'Email not configured' };
           continue;
         }
-        const info = await m.sendMail({ from: config.smtp.from, to: to.email, subject, text: body });
-        await log(ch, to.email, templateKey, logBody, 'SENT', undefined, info.messageId);
+        const sent = await sendEmail(to.email, subject, body);
+        await log(ch, to.email, templateKey, logBody, 'SENT', undefined, sent.id);
       } else if (ch === 'WHATSAPP') {
         if (!to.phone) {
           results[ch] = { status: 'NO_ADDRESS' };

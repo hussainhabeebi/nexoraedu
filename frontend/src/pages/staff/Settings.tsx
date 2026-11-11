@@ -8,7 +8,26 @@ import { confirmDelete, useDelete, useGet, useMut } from '@/lib/hooks';
 import { label } from '@/lib/format';
 import { Badge, Card, Input, Modal, PageHeader, PageLoader, Select, Spinner, Tabs, Textarea } from '@/components/ui';
 
-type Tab = 'general' | 'whatsapp' | 'masters' | 'departments' | 'workflows' | 'templates';
+type Tab = 'general' | 'email' | 'whatsapp' | 'masters' | 'departments' | 'workflows' | 'templates';
+
+function EmailSettings() {
+  const { data, isLoading } = useGet<any>('/admin/email');
+  const [to, setTo] = useState('');
+  const testM = useMut((addr: string) => api('/admin/email/test', { body: { to: addr } }), { success: (r: any) => (r.ok ? `Test email sent to ${to}` : `Not sent: ${r.error}`) });
+  if (isLoading || !data) return <PageLoader />;
+  return (
+    <Card title="Email (Resend)">
+      <div className="space-y-4 text-sm">
+        <p>Status: {data.provider ? <Badge status="ACTIVE">Connected ({data.provider === 'resend' ? 'Resend' : 'SMTP'})</Badge> : <Badge status="FAILED">Not configured</Badge>}</p>
+        <p>Emails are sent from <b>{data.from}</b>. {data.provider ? 'Fee reminders, activation links and password resets are emailed where the person has an email address.' : 'Add the RESEND_API_KEY secret to this Worker in Cloudflare (Settings → Variables and Secrets), then reload this page.'}</p>
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="w-full sm:w-72"><Input label="Send a test email to" type="email" value={to} onChange={(e) => setTo(e.target.value)} /></div>
+          <button className="btn-primary" disabled={!data.provider || !to || testM.isPending} onClick={() => testM.mutate(to)}>Send test email</button>
+        </div>
+      </div>
+    </Card>
+  );
+}
 
 function WhatsAppSettings() {
   const { data, isLoading } = useGet<any>('/whatsapp/config');
@@ -203,6 +222,7 @@ export default function Settings() {
   const tab = ((loc.pathname.split('/')[3] as Tab) || 'general');
   const tabs = [
     { key: 'general' as Tab, label: 'General', show: can('settings:manage', 'masters:manage') },
+    { key: 'email' as Tab, label: 'Email', show: can('settings:manage') },
     { key: 'whatsapp' as Tab, label: 'WhatsApp (Chatwoot)', show: can('settings:manage') },
     { key: 'masters' as Tab, label: 'Master data', show: can('masters:manage') },
     { key: 'departments' as Tab, label: 'Departments', show: can('masters:manage') },
@@ -214,6 +234,7 @@ export default function Settings() {
       <PageHeader title="Settings" subtitle="Every configuration change is audit-logged." />
       <Tabs value={tab} onChange={(k) => nav(`/staff/settings/${k}`)} tabs={tabs} />
       {tab === 'general' && <General />}
+      {tab === 'email' && <EmailSettings />}
       {tab === 'whatsapp' && <WhatsAppSettings />}
       {tab === 'masters' && <Masters />}
       {tab === 'departments' && <Departments />}
