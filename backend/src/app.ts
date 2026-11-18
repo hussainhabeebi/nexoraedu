@@ -15,6 +15,7 @@ import { registerHandlers } from './services/handlers';
 import { openapi } from './openapi';
 import authRoutes from './routes/auth';
 import adminRoutes from './routes/admin';
+import chatbotRoutes from './routes/chatbot';
 import academicsRoutes from './routes/academics';
 import crmRoutes from './routes/crm';
 import studentRoutes, { documentsRouter } from './routes/students';
@@ -94,6 +95,7 @@ export function createApp() {
     if (!(await sendStoredFile(res, name))) throw notFound();
   }));
 
+  v1.use('/admin/chatbot', chatbotRoutes);
   v1.use('/admin', adminRoutes);
   v1.use('/academics', academicsRoutes);
   v1.use('/crm', crmRoutes);

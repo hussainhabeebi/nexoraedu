@@ -10,6 +10,8 @@ import { render } from '../lib/util';
 import * as cw from '../services/chatwoot';
 import { atomic } from '../lib/db';
 
+import { markHumanReply } from '../services/chatbot/bot';
+
 const r = Router();
 
 /**
@@ -90,6 +92,7 @@ r.post('/conversations/:id/reply', can('whatsapp:send'), ah(async (req, res) => 
   const d = sendSchema.parse(req.body);
   await assertConversation(req, Number(req.params.id));
   const out = await cw.replyToConversation(Number(req.params.id), d.content, d.template);
+  await markHumanReply(Number(req.params.id), 'Nexora inbox'); // a person is answering: the chatbot steps back
   await audit(prisma, req, 'WHATSAPP_REPLY', 'whatsapp', String(req.params.id));
   res.json(out);
 }));
@@ -108,6 +111,7 @@ r.post('/leads/:id/send', can('whatsapp:send'), ah(async (req, res) => {
   if (!lead) throw notFound('Lead not found');
   const out = await cw.sendWhatsApp({ phone: lead.phoneNormalized, name: lead.name, email: lead.email, content: d.content, template: d.template, conversationId: lead.chatwootConversationId });
   await logLeadWa(lead.id, req.user!.id, d.content, out.conversationId!);
+  if (out.conversationId) await markHumanReply(out.conversationId, 'Nexora lead page');
   if (out.contactId && !lead.chatwootContactId) await prisma.lead.update({ where: { id: lead.id }, data: { chatwootContactId: out.contactId } });
   res.json(out);
 }));
@@ -124,6 +128,7 @@ r.post('/students/:id/send', can('whatsapp:send'), ah(async (req, res) => {
   const st = await prisma.student.findUniqueOrThrow({ where: { id: req.params.id }, include: { lead: true } });
   const out = await cw.sendWhatsApp({ phone: st.phoneNormalized, name: st.fullName, email: st.email, content: d.content, template: d.template, conversationId: st.lead?.chatwootConversationId });
   if (st.lead) await logLeadWa(st.lead.id, req.user!.id, d.content, out.conversationId!);
+  if (out.conversationId) await markHumanReply(out.conversationId, 'Nexora student page');
   await prisma.studentHistory.create({ data: { studentId: st.id, type: 'COMMUNICATION', message: `WhatsApp sent: ${d.content.slice(0, 120)}`, userId: req.user!.id } });
   res.json(out);
 }));

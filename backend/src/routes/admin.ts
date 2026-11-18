@@ -351,6 +351,7 @@ r.get('/settings', can('settings:manage', 'masters:manage'), ah(async (_req, res
 r.put('/settings/:key', can('settings:manage'), ah(async (req, res) => {
   const key = req.params.key as keyof typeof DEFAULT_SETTINGS;
   if (!(key in DEFAULT_SETTINGS)) throw badRequest('Unknown settings group.');
+  if (key === 'chatbot') throw badRequest('Use Settings → WhatsApp AI Chatbot to change the chatbot.');
   const before = (await getSettings())[key];
   const value: any = { ...before, ...z.record(z.string(), z.any()).parse(req.body) };
   if (key === 'academy' && value.timeZone !== undefined && !isValidTimeZone(String(value.timeZone))) throw badRequest('Unknown time zone. Use an IANA name such as Asia/Kolkata.');

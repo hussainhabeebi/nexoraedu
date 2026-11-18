@@ -6,9 +6,10 @@ import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { confirmDelete, useDelete, useGet, useMut } from '@/lib/hooks';
 import { label } from '@/lib/format';
+import ChatbotSettings from './ChatbotSettings';
 import { Badge, Card, Input, Modal, PageHeader, PageLoader, Select, Spinner, Tabs, Textarea } from '@/components/ui';
 
-type Tab = 'general' | 'email' | 'whatsapp' | 'masters' | 'departments' | 'workflows' | 'templates';
+type Tab = 'general' | 'email' | 'whatsapp' | 'chatbot' | 'masters' | 'departments' | 'workflows' | 'templates';
 
 function EmailSettings() {
   const { data, isLoading } = useGet<any>('/admin/email');
@@ -224,6 +225,7 @@ export default function Settings() {
     { key: 'general' as Tab, label: 'General', show: can('settings:manage', 'masters:manage') },
     { key: 'email' as Tab, label: 'Email', show: can('settings:manage') },
     { key: 'whatsapp' as Tab, label: 'WhatsApp (Chatwoot)', show: can('settings:manage') },
+    { key: 'chatbot' as Tab, label: 'WhatsApp AI Chatbot', show: can('chatbot:manage') },
     { key: 'masters' as Tab, label: 'Master data', show: can('masters:manage') },
     { key: 'departments' as Tab, label: 'Departments', show: can('masters:manage') },
     { key: 'workflows' as Tab, label: 'Approval workflows', show: can('settings:manage') },
@@ -236,6 +238,7 @@ export default function Settings() {
       {tab === 'general' && <General />}
       {tab === 'email' && <EmailSettings />}
       {tab === 'whatsapp' && <WhatsAppSettings />}
+      {tab === 'chatbot' && <ChatbotSettings />}
       {tab === 'masters' && <Masters />}
       {tab === 'departments' && <Departments />}
       {tab === 'workflows' && <Workflows />}

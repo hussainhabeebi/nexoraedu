@@ -649,6 +649,8 @@ model Guardian {
   name       String
   relation   String
   phone      String
+  /// Normalised phone (+91…) for matching incoming WhatsApp numbers to parents
+  phoneNormalized String?
   email      String?
   occupation String?
   /// Parent portal account for this guardian (role "parent"); NULL = contact only, no sign-in
@@ -656,6 +658,7 @@ model Guardian {
   user       User?   @relation("GuardianUser", fields: [userId], references: [id])
 
   @@index([userId])
+  @@index([phoneNormalized])
   @@map("guardians")
 }
 
@@ -1202,4 +1205,49 @@ model IntegrationLog {
 
   @@index([name, createdAt])
   @@map("integration_logs")
+}
+
+
+// ───────────────────────────── WhatsApp AI chatbot (Chatwoot) ─────────────────────────────
+
+/**
+ * Ledger of incoming Chatwoot WhatsApp messages. The Chatwoot message id is unique: a retried or duplicated webhook
+ * event is recognised and never creates a second lead, activity, notification or bot reply.
+ */
+model ChatwootMessageEvent {
+  id                String   @id @default(cuid())
+  chatwootMessageId String   @unique
+  conversationId    Int
+  /// LEAD, STUDENT, PARENT or UNKNOWN (matched by normalised phone)
+  contactKind       String   @default("UNKNOWN")
+  leadId            String?
+  /// OFF (bot disabled), PENDING, SENDING, REPLIED, SKIPPED, HANDOVER, FAILED
+  botStatus         String   @default("OFF")
+  botReason         String?
+  /// Text the bot sent (reply or handover message); stored BEFORE sending so Chatwoot's echo is recognised
+  botReplyText      String?
+  botReplyMessageId String?
+  botModel          String?
+  inputTokens       Int?
+  outputTokens      Int?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([conversationId, createdAt])
+  @@index([botStatus, createdAt])
+  @@map("chatwoot_message_events")
+}
+
+/** Bot state per Chatwoot conversation: BOT answers; HUMAN = handed over (the bot stays silent until resumed). */
+model ChatbotConversation {
+  id             String    @id @default(cuid())
+  conversationId Int       @unique
+  mode           String    @default("BOT") // BOT, HUMAN
+  botReplies     Int       @default(0)
+  handedOverAt   DateTime?
+  handoverReason String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@map("chatbot_conversations")
 }

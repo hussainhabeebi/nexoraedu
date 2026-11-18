@@ -36,6 +36,23 @@ export const DEFAULT_SETTINGS = {
     reminderDaysBefore: [5, 2], reminderDaysAfter: [1, 7], overdueEveryDays: 7, overdueMaxDays: 120,
     remindGuardians: true, reminderChannels: ['IN_APP', 'WHATSAPP', 'EMAIL'] as string[], reminderMaxAttempts: 3,
   },
+  /**
+   * WhatsApp AI chatbot (Chatwoot inbox, Anthropic Claude). OFF by default; only Admins / Super Admins change it
+   * (Settings → WhatsApp AI Chatbot). The model and the safety rules are fixed in code (services/chatbot).
+   */
+  chatbot: {
+    enabled: false,
+    systemPrompt: `You are the WhatsApp assistant of Nexora Academy. You help people who enquire about our courses.
+
+- Be warm, polite and brief, like a helpful counsellor on WhatsApp.
+- Answer questions about courses, duration, fees, batches, eligibility and how to apply, using only the academy facts and knowledge you are given.
+- Gently find out the person's name, the course they are interested in, their qualification and their city, one question at a time, when it fits the conversation.
+- Encourage them to apply online or to visit or call the academy.`,
+    knowledge: '',
+    maxBotReplies: 8,
+    handoverKeywords: ['human', 'agent', 'counsellor', 'counselor', 'staff', 'call me', 'talk to someone', 'complaint', 'refund'] as string[],
+    handoverMessage: 'Thank you! I have passed your message to our counsellor, who will reply to you here shortly.',
+  },
   academics: { attendanceThreshold: 75, attendanceEditWindowHours: 24 },
   exams: { minAttendanceForExam: 0, requireFeesCleared: false, gradeScale: [
     { min: 90, grade: 'A+' }, { min: 80, grade: 'A' }, { min: 70, grade: 'B+' }, { min: 60, grade: 'B' }, { min: 50, grade: 'C' }, { min: 40, grade: 'D' }, { min: 0, grade: 'F' },

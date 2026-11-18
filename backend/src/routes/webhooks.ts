@@ -9,6 +9,9 @@ import { normalizePhone } from '../lib/util';
 import { getChatwootConfig } from '../services/chatwoot';
 import { notifyUser } from '../services/notify';
 import { createLead, findDuplicateLead } from './crm';
+import { findOrCreateLeadForPhone, matchContact } from '../services/chatbot/contacts';
+import { chatbotState, onOutgoingMessage, runBot } from '../services/chatbot/bot';
+import { background } from '../lib/background';
 import { recordPayment } from '../services/finance';
 import { atomic } from '../lib/db';
 
@@ -44,22 +47,51 @@ r.post('/chatwoot', ah(async (req, res) => {
       if (!rawPhone) return res.json({ ignored: 'no phone' });
       const phone = normalizePhone(String(rawPhone));
       const conversationId = Number(e.conversation?.id);
-      let lead = await prisma.lead.findFirst({ where: { phoneNormalized: phone }, orderBy: { createdAt: 'desc' } });
-      const student = await prisma.student.findUnique({ where: { phoneNormalized: phone } });
-      if (!lead && !student && c.autoCreateLeads) {
-        lead = await atomic((tx) => createLead(tx, { name: sender.name || phone, phone, email: sender.email || null, source: 'whatsapp', notes: `First WhatsApp message: ${String(e.content ?? '').slice(0, 500)}` }, undefined, { chatwootContactId: Number(sender.id) || null, chatwootConversationId: conversationId || null }));
+      const content = String(e.content ?? '');
+      // Each Chatwoot message is processed once: a retried or duplicated event creates no second lead, activity,
+      // notification or chatbot reply.
+      let eventId: string | null = null;
+      if (e.id != null && conversationId) {
+        try {
+          eventId = (await prisma.chatwootMessageEvent.create({ data: { chatwootMessageId: String(e.id), conversationId } })).id;
+        } catch (err: any) {
+          if (err?.code === 'P2002' || /UNIQUE constraint failed/i.test(String(err?.message))) {
+            await prisma.integrationLog.create({ data: { name: 'chatwoot-webhook', method: 'POST', endpoint: 'message_created (duplicate)', status: 200, durationMs: Date.now() - started } });
+            return res.json({ ok: true, duplicate: true });
+          }
+          throw err;
+        }
+      }
+      const m = await matchContact(phone);
+      let lead = m.lead;
+      // Students and parents never become leads; a new number becomes ONE lead (per-phone lock).
+      if (!lead && m.kind === 'UNKNOWN' && c.autoCreateLeads) {
+        lead = (await findOrCreateLeadForPhone(phone, sender.name || null, content || '[attachment]', { chatwootContactId: Number(sender.id) || null, chatwootConversationId: conversationId || null })).lead;
       }
       if (lead) {
         const l = lead;
         await atomic(async (tx) => {
-          await tx.leadActivity.create({ data: { leadId: l.id, type: 'WHATSAPP', direction: 'INBOUND', content: String(e.content ?? '[attachment]'), meta: { conversationId, messageId: e.id } } });
+          await tx.leadActivity.create({ data: { leadId: l.id, type: 'WHATSAPP', direction: 'INBOUND', content: content || '[attachment]', meta: { conversationId, messageId: e.id } } });
           await tx.lead.update({ where: { id: l.id }, data: { lastActivityAt: new Date(), chatwootConversationId: conversationId || l.chatwootConversationId, chatwootContactId: Number(sender.id) || l.chatwootContactId } });
         });
-        if (lead.ownerId) await notifyUser(lead.ownerId, `WhatsApp from ${lead.name}`, String(e.content ?? '').slice(0, 140), `/staff/leads/${lead.id}`);
+        if (lead.ownerId) await notifyUser(lead.ownerId, `WhatsApp from ${lead.name}`, content.slice(0, 140), `/staff/leads/${lead.id}`);
       }
-      if (student) {
-        await prisma.studentHistory.create({ data: { studentId: student.id, type: 'COMMUNICATION', message: `WhatsApp received: ${String(e.content ?? '').slice(0, 200)}` } });
+      const studentId = m.student?.id ?? m.guardian?.studentId ?? null;
+      if (studentId) {
+        await prisma.studentHistory.create({ data: { studentId, type: 'COMMUNICATION', message: `WhatsApp received${m.kind === 'PARENT' ? ' from parent / guardian' : ''}: ${content.slice(0, 200)}` } });
       }
+      if (eventId) {
+        const kind = m.kind === 'UNKNOWN' && lead ? 'LEAD' : m.kind;
+        const state = await chatbotState();
+        await prisma.chatwootMessageEvent.update({ where: { id: eventId }, data: { contactKind: kind, leadId: lead?.id ?? null, botStatus: state.enabled ? 'PENDING' : 'OFF' } });
+        // The AI reply runs after Chatwoot has its answer (waitUntil on Cloudflare), so the webhook stays fast.
+        if (state.enabled) background(() => runBot({ eventId: eventId!, conversationId, messageId: String(e.id), content, kind, leadId: lead?.id ?? null }));
+      }
+    } else if (e.event === 'message_created' && (e.message_type === 'outgoing' || e.message_type === 1) && !e.private && e.conversation?.id) {
+      // An outgoing message: the chatbot's own reply (ignored) or a staff reply, which hands the conversation over.
+      const who = await onOutgoingMessage(Number(e.conversation.id), String(e.id ?? ''), String(e.content ?? ''));
+      await prisma.integrationLog.create({ data: { name: 'chatwoot-webhook', method: 'POST', endpoint: `message_created (outgoing, ${who})`, status: 200, durationMs: Date.now() - started } });
+      return res.json({ ok: true, outgoing: who });
     } else if (e.event === 'message_updated' && e.id) {
       // Delivery/read status updates for messages we sent
       const status = String(e.status || '').toUpperCase();

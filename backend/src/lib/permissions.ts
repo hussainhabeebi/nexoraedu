@@ -13,7 +13,7 @@ export const PERMISSIONS = {
   'attendance:mark': 'Mark attendance', 'materials:manage': 'Materials & assignments',
   'exams:read': 'View exams', 'exams:manage': 'Question bank, exams, results',
   'reports:read': 'View & export reports', 'approvals:act': 'Act on approvals', 'audit:read': 'View audit logs',
-  'whatsapp:send': 'Send WhatsApp messages (Chatwoot)', 'notifications:manage': 'Manage notification templates',
+  'whatsapp:send': 'Send WhatsApp messages (Chatwoot)', 'chatbot:manage': 'Configure the WhatsApp AI chatbot', 'notifications:manage': 'Manage notification templates',
 } as const;
 export type Permission = keyof typeof PERMISSIONS | '*' | 'portal:student' | 'portal:parent';
 
@@ -25,7 +25,7 @@ export const DEFAULT_ROLES: { key: string; name: string; permissions: Permission
   },
   {
     key: 'admin', name: 'Administrator',
-    permissions: ['users:read', 'users:manage', 'masters:manage', 'leads:read', 'leads:read_all', 'students:read', 'students:manage', 'documents:verify', 'finance:read', 'academics:read', 'exams:read', 'reports:read', 'notifications:manage', 'whatsapp:send'],
+    permissions: ['users:read', 'users:manage', 'masters:manage', 'leads:read', 'leads:read_all', 'students:read', 'students:manage', 'documents:verify', 'finance:read', 'academics:read', 'exams:read', 'reports:read', 'notifications:manage', 'whatsapp:send', 'chatbot:manage'],
   },
   {
     key: 'sales_manager', name: 'Sales Manager',
