@@ -52,6 +52,12 @@ export const DEFAULT_SETTINGS = {
     maxBotReplies: 8,
     /** Cost safeguard: at most this many AI calls per day (academy calendar); then conversations go to staff. */
     dailyAiLimit: 300,
+    /**
+     * Test mode (default ON): AI replies go only to testNumbers (normalised, max 5); every other enquiry is handled by
+     * staff exactly as when the bot is off. Going live (testMode false) needs an explicit confirmation in the admin page.
+     */
+    testMode: true,
+    testNumbers: [] as string[],
     handoverKeywords: ['human', 'agent', 'counsellor', 'counselor', 'staff', 'call me', 'talk to someone', 'complaint', 'refund'] as string[],
     handoverMessage: 'Thank you! I have passed your message to our counsellor, who will reply to you here shortly.',
   },

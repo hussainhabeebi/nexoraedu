@@ -13,6 +13,7 @@ export default function ChatbotSettings() {
   const { data, isLoading } = useGet<any>('/admin/chatbot');
   const [f, setF] = useState<any>(null);
   const [keywords, setKeywords] = useState('');
+  const [numbers, setNumbers] = useState('');
   const [test, setTest] = useState({ message: '' });
   const [result, setResult] = useState<any>(null);
   const [page, setPage] = useState(1);
@@ -21,22 +22,33 @@ export default function ChatbotSettings() {
     if (data) {
       setF({ ...data.config });
       setKeywords((data.config.handoverKeywords ?? []).join(', '));
+      setNumbers((data.config.testNumbers ?? []).join(', '));
     }
   }, [data]);
-  const body = () => ({ ...f, maxBotReplies: Number(f.maxBotReplies), dailyAiLimit: Number(f.dailyAiLimit ?? 300), handoverKeywords: keywords.split(',').map((k) => k.trim()).filter(Boolean) });
+  const body = () => ({ ...f, testMode: f.testMode !== false, testNumbers: numbers.split(/[,\n]/).map((n) => n.trim()).filter(Boolean), maxBotReplies: Number(f.maxBotReplies), dailyAiLimit: Number(f.dailyAiLimit ?? 300), handoverKeywords: keywords.split(',').map((k) => k.trim()).filter(Boolean) });
   const save = useMut((v: any) => api('/admin/chatbot', { method: 'PUT', body: v }), { success: 'Chatbot settings saved', invalidate: ['/admin/chatbot'] });
   const run = useMut(() => api('/admin/chatbot/test', { body: { message: test.message, draft: { systemPrompt: f.systemPrompt, knowledge: f.knowledge } } }), { onSuccess: (r: any) => setResult(r) });
   const resume = useMut((id: number) => api(`/admin/chatbot/conversations/${id}/resume`, { body: {} }), { success: 'The assistant will answer this conversation again', invalidate: ['/admin/chatbot'] });
   if (isLoading || !f) return <PageLoader />;
   const st = data.status;
   const missing = [!st.aiConfigured && 'the ANTHROPIC_API_KEY secret on this Worker (Cloudflare → Workers & Pages → this Worker → Settings → Variables and Secrets)', !st.chatwootReady && 'a working Chatwoot connection (Settings → WhatsApp)'].filter(Boolean);
-  const dirty = JSON.stringify(body()) !== JSON.stringify({ ...data.config, maxBotReplies: Number(data.config.maxBotReplies), dailyAiLimit: Number(data.config.dailyAiLimit ?? 300) });
+  const dirty = JSON.stringify(body()) !== JSON.stringify({ ...data.config, testMode: data.config.testMode !== false, testNumbers: data.config.testNumbers ?? [], maxBotReplies: Number(data.config.maxBotReplies), dailyAiLimit: Number(data.config.dailyAiLimit ?? 300) });
+  const wasLive = data.config.enabled && data.config.testMode === false;
+  // Going live (answering ALL enquiries) always needs an explicit confirmation.
+  const onSave = () => {
+    const b = body();
+    if (b.enabled && !b.testMode && !wasLive) {
+      if (!window.confirm('Go live? The assistant will answer ALL new WhatsApp enquiries, not only your test numbers.')) return;
+      return save.mutate({ ...b, confirmLive: true });
+    }
+    save.mutate(b);
+  };
 
   return (
     <div className="space-y-6">
       <Card title={<span className="flex items-center gap-2"><Bot className="h-4 w-4" /> Assistant status</span>}>
         <div className="flex flex-wrap items-center gap-2 text-sm">
-          <Badge status={st.active ? 'ACTIVE' : st.enabled ? 'PENDING' : 'INACTIVE'}>{st.active ? 'On — answering new WhatsApp enquiries' : st.enabled ? 'On, but not ready' : 'Off'}</Badge>
+          <Badge status={st.active ? (st.testMode ? 'PENDING' : 'ACTIVE') : st.enabled ? 'PENDING' : 'INACTIVE'}>{st.active ? (st.testMode ? `On — TEST MODE (replies only to ${st.testNumbers} test number${st.testNumbers === 1 ? '' : 's'})` : 'On — LIVE: answering all new WhatsApp enquiries') : st.enabled ? 'On, but not ready' : 'Off'}</Badge>
           <Badge status={st.aiConfigured ? 'ACTIVE' : 'FAILED'}>AI key {st.aiConfigured ? 'configured' : 'missing'}</Badge>
           <Badge status={st.chatwootReady ? 'ACTIVE' : 'FAILED'}>Chatwoot {st.chatwootReady ? 'connected' : 'not connected'}</Badge>
           <span className="text-slate-500">Model: {st.model} · {data.publishedCourses} published course(s) used as facts</span>
@@ -49,12 +61,19 @@ export default function ChatbotSettings() {
         )}
       </Card>
 
-      <Card title="Behaviour" actions={<button className="btn-primary btn-sm" disabled={save.isPending || !dirty} onClick={() => save.mutate(body())}>{save.isPending && <Spinner className="h-4 w-4 text-white" />} Save</button>}>
+      <Card title="Behaviour" actions={<button className="btn-primary btn-sm" disabled={save.isPending || !dirty} onClick={onSave}>{save.isPending && <Spinner className="h-4 w-4 text-white" />} Save</button>}>
         <div className="space-y-4">
           <label className="flex items-start gap-2 text-sm">
             <input type="checkbox" className="mt-0.5 rounded text-brand-600" checked={!!f.enabled} disabled={!f.enabled && (!st.aiConfigured || !st.chatwootReady)} onChange={(e) => setF({ ...f, enabled: e.target.checked })} />
             <span><b>Enable the WhatsApp AI assistant.</b> It answers new enquiries (unknown numbers and leads) on the Chatwoot WhatsApp inbox. Students and parents are always answered by staff.</span>
           </label>
+          <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3">
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-0.5 rounded text-brand-600" checked={f.testMode !== false} onChange={(e) => setF({ ...f, testMode: e.target.checked })} />
+              <span><b>Test mode — reply only to the test numbers below.</b> All other enquiries are left to staff (no AI call, no reply). Turn this off only to go live; you will be asked to confirm.</span>
+            </label>
+            <div className="mt-3"><Input label="Test WhatsApp numbers" value={numbers} onChange={(e) => setNumbers(e.target.value)} placeholder="+91 98765 43210" hint="Up to 5, separated by commas. Use a number that is not saved as a student's or parent's phone." /></div>
+          </div>
           <Textarea label="System prompt" rows={14} value={f.systemPrompt} onChange={(e) => setF({ ...f, systemPrompt: e.target.value })} hint="How the assistant should behave. Safety rules are always added after this (shown below) and cannot be removed." />
           <Textarea label="Additional knowledge" rows={8} value={f.knowledge} onChange={(e) => setF({ ...f, knowledge: e.target.value })} hint="Verified facts not in the course data: office timings, documents needed, how to apply, payment options… The assistant uses only this and the published course data (courses, fees, batches)." />
           <details className="rounded-lg bg-slate-50 p-3 text-xs text-slate-600"><summary className="cursor-pointer font-medium">Fixed safety rules (always applied)</summary><pre className="mt-2 whitespace-pre-wrap font-sans">{data.fixedRules}</pre></details>
