@@ -123,7 +123,7 @@ export async function admitApplication(tx: Tx, applicationId: string, opts: { ba
       batchId,
       status: 'ADMITTED',
       chatwootContactId: app.lead?.chatwootContactId,
-      guardians: { create: data.guardians.map((g) => ({ ...g, email: g.email || null })) },
+      guardians: { create: data.guardians.map((g) => ({ ...g, email: g.email || null, phoneNormalized: normalizePhone(g.phone) })) },
       education: { create: data.education },
     },
     include: { course: true, batch: true },

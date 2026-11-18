@@ -238,7 +238,7 @@ r.post('/:id/transfer', can('students:manage', 'academics:manage'), ah(async (re
 r.post('/:id/guardians', can('students:manage'), ah(async (req, res) => {
   const d = guardianSchema.parse(req.body);
   const g = await atomic(async (tx) => {
-    const g = await tx.guardian.create({ data: { ...d, email: d.email || null, studentId: req.params.id } });
+    const g = await tx.guardian.create({ data: { ...d, email: d.email || null, phoneNormalized: normalizePhone(d.phone), studentId: req.params.id } });
     await audit(tx, req, 'CREATE', 'guardian', g.id, null, { studentId: req.params.id, ...d });
     return g;
   });

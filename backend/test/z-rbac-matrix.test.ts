@@ -46,6 +46,7 @@ const EXM_M: Role[] = ['sa', 'exam'];
 const APPROVERS: Role[] = ['sa', 'mgmt', 'sales', 'finmgr', 'acad', 'exam'];
 const WA: Role[] = ['sa', 'admin', 'sales', 'couns', 'finmgr', 'finstaff', 'acad', 'exam'];
 const STUDENT: Role[] = ['student'];
+const CHATBOT: Role[] = ['sa', 'admin'];
 const PARENT: Role[] = ['sa', 'parent']; // Super Admin oversight: sees no children unless linked
 
 const MATRIX: Record<string, Exp> = {
@@ -125,6 +126,8 @@ const MATRIX: Record<string, Exp> = {
   'GET /portal/me': STUDENT, 'GET /portal/enrollments': STUDENT, 'GET /portal/timetable': STUDENT, 'GET /portal/attendance': STUDENT, 'GET /portal/fees': STUDENT,
   'GET /portal/payments/:id/receipt.pdf': STUDENT, 'GET /portal/materials': STUDENT, 'GET /portal/assignments': STUDENT, 'POST /portal/assignments/:id/submit': STUDENT,
   'GET /portal/results': STUDENT, 'GET /portal/certificates': STUDENT, 'GET /portal/certificates/:id/pdf': STUDENT, 'GET /portal/exams': STUDENT,
+  // ── WhatsApp AI chatbot (Admin / Super Admin) ──
+  'GET /admin/chatbot': CHATBOT, 'PUT /admin/chatbot': CHATBOT, 'POST /admin/chatbot/test': CHATBOT, 'GET /admin/chatbot/events': CHATBOT, 'POST /admin/chatbot/conversations/:conversationId/resume': CHATBOT,
   // ── Parent portal (linked children's fees and receipts only) ──
   'GET /parent/children': PARENT, 'GET /parent/children/:studentId/fees': PARENT, 'GET /parent/children/:studentId/payments/:paymentId/receipt.pdf': PARENT,
   'POST /students/:id/guardians/:gid/parent-account': STU_W, 'DELETE /students/:id/guardians/:gid/parent-account': STU_W,
@@ -134,7 +137,7 @@ const MATRIX: Record<string, Exp> = {
 /** Route inventory read from source: mount prefixes from app.ts, handlers from each router file. */
 function inventory(): string[] {
   const src = path.resolve(__dirname, '../src');
-  const mounts: Record<string, string> = { auth: '/auth', public: '/public', webhooks: '/webhooks', admin: '/admin', academics: '/academics', crm: '/crm', students: '/students', finance: '/finance', exams: '/exams', approvals: '/approvals', notifications: '/notifications', whatsapp: '/whatsapp', dashboard: '/dashboard', portal: '/portal', parent: '/parent' };
+  const mounts: Record<string, string> = { auth: '/auth', public: '/public', webhooks: '/webhooks', admin: '/admin', academics: '/academics', crm: '/crm', students: '/students', finance: '/finance', exams: '/exams', approvals: '/approvals', notifications: '/notifications', whatsapp: '/whatsapp', dashboard: '/dashboard', portal: '/portal', parent: '/parent', chatbot: '/admin/chatbot' };
   const out: string[] = [];
   for (const f of fs.readdirSync(path.join(src, 'routes'))) {
     const name = f.replace(/\.ts$/, '');

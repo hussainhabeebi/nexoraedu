@@ -134,7 +134,7 @@ export default function App() {
           <Route path="whatsapp" element={P(['whatsapp:send'], <WhatsApp />)} />
           <Route path="reports" element={P(['reports:read'], <Reports />)} />
           <Route path="users" element={P(['users:read'], <Users />)} />
-          <Route path="settings/*" element={P(['settings:manage', 'masters:manage', 'notifications:manage'], <Settings />)} />
+          <Route path="settings/*" element={P(['settings:manage', 'masters:manage', 'notifications:manage', 'chatbot:manage'], <Settings />)} />
           <Route path="audit" element={P(['audit:read'], <Audit />)} />
           <Route path="*" element={<NotFound />} />
         </Route>
