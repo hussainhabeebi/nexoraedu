@@ -30,7 +30,8 @@ export async function chatbotState() {
   const s = await getSettings();
   const c = await cw.getChatwootConfig();
   const chatwootReady = !!(c.enabled && c.apiToken && c.accountId && c.inboxId);
-  return { enabled: !!s.chatbot.enabled, aiConfigured: aiConfigured(), chatwootReady, model: CHATBOT_MODEL, active: !!s.chatbot.enabled && aiConfigured() && chatwootReady };
+  const testMode = s.chatbot.testMode !== false;
+  return { enabled: !!s.chatbot.enabled, testMode, testNumbers: testMode ? (s.chatbot.testNumbers ?? []).length : 0, aiConfigured: aiConfigured(), chatwootReady, model: CHATBOT_MODEL, active: !!s.chatbot.enabled && aiConfigured() && chatwootReady };
 }
 
 async function conversationState(conversationId: number) {
@@ -154,7 +155,7 @@ async function conversationTurns(conversationId: number, current: { id: string; 
   return turns.slice(-HISTORY);
 }
 
-export interface IncomingForBot { eventId: string; conversationId: number; messageId: string; content: string; kind: string; leadId: string | null }
+export interface IncomingForBot { eventId: string; conversationId: number; messageId: string; content: string; kind: string; leadId: string | null; phone: string }
 
 /** Runs the bot for one recorded incoming message. Never throws (the webhook has already answered Chatwoot). */
 export async function runBot(m: IncomingForBot) {
@@ -162,6 +163,8 @@ export async function runBot(m: IncomingForBot) {
     const s = await getSettings();
     const st = await chatbotState();
     if (!st.enabled) return setEvent(m.eventId, { botStatus: 'OFF' });
+    // Test mode: only the listed test numbers get AI replies. Everyone else: no AI call, no message (staff handle it).
+    if (st.testMode && !(s.chatbot.testNumbers ?? []).includes(m.phone)) return setEvent(m.eventId, { botStatus: 'SKIPPED', botReason: 'Test mode: not a test number' });
     if (!st.aiConfigured) return setEvent(m.eventId, { botStatus: 'SKIPPED', botReason: 'AI is not configured (ANTHROPIC_API_KEY missing)' });
     if (m.kind === 'STUDENT' || m.kind === 'PARENT') return setEvent(m.eventId, { botStatus: 'SKIPPED', botReason: `Existing ${m.kind === 'STUDENT' ? 'student' : 'parent'}: answered by staff` });
     const conv = await conversationState(m.conversationId);

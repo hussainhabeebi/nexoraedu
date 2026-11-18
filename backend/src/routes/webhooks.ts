@@ -85,7 +85,7 @@ r.post('/chatwoot', ah(async (req, res) => {
         const state = await chatbotState();
         await prisma.chatwootMessageEvent.update({ where: { id: eventId }, data: { contactKind: kind, leadId: lead?.id ?? null, botStatus: state.enabled ? 'PENDING' : 'OFF' } });
         // The AI reply runs after Chatwoot has its answer (waitUntil on Cloudflare), so the webhook stays fast.
-        if (state.enabled) background(() => runBot({ eventId: eventId!, conversationId, messageId: String(e.id), content, kind, leadId: lead?.id ?? null }));
+        if (state.enabled) background(() => runBot({ eventId: eventId!, conversationId, messageId: String(e.id), content, kind, leadId: lead?.id ?? null, phone }));
       }
     } else if (e.event === 'message_created' && (e.message_type === 'outgoing' || e.message_type === 1) && !e.private && e.conversation?.id) {
       // An outgoing message: the chatbot's own reply (ignored) or a staff reply, which hands the conversation over.

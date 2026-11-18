@@ -159,9 +159,13 @@ describe('bot disabled', () => {
 describe('bot enabled', () => {
   beforeAll(async () => {
     process.env.ANTHROPIC_API_KEY = FAKE_KEY;
-    const on = await saveBot(admin, { enabled: true });
+    // These tests exercise the LIVE bot: going live needs explicit confirmation (test mode is the default).
+    expect((await saveBot(admin, { enabled: true })).status).toBe(400); // test mode on, but no test numbers
+    expect((await saveBot(admin, { enabled: true, testMode: false })).status).toBe(400); // live without confirmation
+    const on = await saveBot(admin, { enabled: true, testMode: false, confirmLive: true });
     expect(on.status, JSON.stringify(on.body)).toBe(200);
-    expect(on.body.status.active).toBe(true);
+    expect(on.body.status).toMatchObject({ active: true, testMode: false });
+    expect(await prisma.auditLog.count({ where: { action: 'CHATBOT_GO_LIVE' } })).toBeGreaterThan(0);
   });
 
   it('a new enquiry: one lead (existing assignment rules), grounded AI reply sent through Chatwoot, details saved', async () => {
@@ -403,6 +407,59 @@ describe('bot enabled', () => {
     const e = incoming(c, newPhone(), 'Hi');
     await hook(e);
     expect((await eventOf(e.id))!.botStatus).toBe('OFF');
+    expect(aiCalls.length).toBe(calls);
+  });
+});
+
+describe('test mode (only the listed numbers get AI replies)', () => {
+  const testPhone = `+91${9100000000 + Math.floor(Math.random() * 9_999_999)}`;
+  beforeAll(async () => {
+    const r = await saveBot(admin, { enabled: true, testMode: true, testNumbers: [`0${testPhone.slice(3, 8)} ${testPhone.slice(8)}`] });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.config.testNumbers).toEqual([testPhone]); // stored normalised
+    expect(r.body.status).toMatchObject({ enabled: true, testMode: true, testNumbers: 1, active: true });
+  });
+  afterAll(async () => {
+    await saveBot(admin, { enabled: false, testMode: true, testNumbers: [] });
+  });
+
+  it('the default is test mode; it needs at least one valid number', async () => {
+    expect((await request(app).get('/api/v1/admin/chatbot').set(as(admin))).body.config.testMode).toBe(true);
+    expect((await saveBot(admin, { enabled: true, testMode: true, testNumbers: ['12345'] })).status).toBe(400);
+    expect((await saveBot(admin, { enabled: true, testMode: true, testNumbers: ['1', '2', '3', '4', '5', '6'] })).status).toBe(422);
+  });
+
+  it('the test number gets an AI reply from Claude Haiku 5.5', async () => {
+    const c = ++conv;
+    const e = incoming(c, testPhone, 'Hi, which courses do you have?');
+    await hook(e);
+    expect(await settled(e.id)).toMatchObject({ botStatus: 'REPLIED', botModel: 'claude-haiku-5-5' });
+    expect(botSent(c)).toHaveLength(1);
+    expect(aiCalls[aiCalls.length - 1].body.model).toBe('claude-haiku-5-5');
+  });
+
+  it('every other customer: no AI call, no message; handled by staff as when the bot is off', async () => {
+    const c = ++conv;
+    const phone = newPhone();
+    const calls = aiCalls.length;
+    const e = incoming(c, phone, 'Hello, I want course details');
+    await hook(e);
+    expect(await settled(e.id)).toMatchObject({ botStatus: 'SKIPPED', botReason: 'Test mode: not a test number' });
+    expect(aiCalls.length).toBe(calls);
+    expect(cwSent.filter((x) => x.conv === c)).toHaveLength(0); // not even a handover message or note
+    const lead = await prisma.lead.findFirstOrThrow({ where: { phoneNormalized: phone } }); // CRM unchanged: lead + activity
+    expect(await prisma.leadActivity.count({ where: { leadId: lead.id, type: 'WHATSAPP', direction: 'INBOUND' } })).toBe(1);
+    expect(await prisma.chatbotConversation.count({ where: { conversationId: c } })).toBe(0);
+  });
+
+  it('students and parents stay with staff even if their number is in the test list', async () => {
+    const st = await makeStudent({});
+    await saveBot(admin, { enabled: true, testMode: true, testNumbers: [testPhone, st.phoneNormalized] });
+    const c = ++conv;
+    const calls = aiCalls.length;
+    const e = incoming(c, st.phoneNormalized, 'Hi');
+    await hook(e);
+    expect(await settled(e.id)).toMatchObject({ botStatus: 'SKIPPED', contactKind: 'STUDENT' });
     expect(aiCalls.length).toBe(calls);
   });
 });

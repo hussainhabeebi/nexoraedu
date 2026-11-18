@@ -11,6 +11,7 @@ import { can } from '../lib/auth';
 import { audit } from '../lib/audit';
 import { atomic } from '../lib/db';
 import { getSettings, invalidateSettings } from '../lib/settings';
+import { normalizePhone } from '../lib/util';
 import { chatbotState, testBot } from '../services/chatbot/bot';
 import { FIXED_RULES } from '../services/chatbot/claude';
 import { academyFacts } from '../services/chatbot/facts';
@@ -24,6 +25,8 @@ const configSchema = z.object({
   knowledge: z.string().max(20_000),
   maxBotReplies: z.number().int().min(1).max(50),
   dailyAiLimit: z.number().int().min(1).max(5000).default(300),
+  testMode: z.boolean().default(true),
+  testNumbers: z.array(z.string().trim().min(1).max(30)).max(5).default([]),
   handoverKeywords: z.array(z.string().trim().min(2).max(60)).max(40),
   handoverMessage: z.string().trim().min(5).max(500),
 });
@@ -44,14 +47,23 @@ r.get('/', ah(async (_req, res) => {
 
 r.put('/', ah(async (req, res) => {
   const d = configSchema.parse(req.body);
+  const { confirmLive } = z.object({ confirmLive: z.boolean().optional() }).parse({ confirmLive: req.body?.confirmLive });
   const before = (await getSettings()).chatbot;
+  // Test numbers are stored normalised (+91…), so they match incoming WhatsApp numbers in any written format.
+  const testNumbers = [...new Set(d.testNumbers.map((n) => normalizePhone(n)))];
+  if (testNumbers.some((n) => !/^\+\d{10,15}$/.test(n))) throw badRequest('Each test number must be a full phone number, e.g. +91 98765 43210.');
   const st = await chatbotState();
   if (d.enabled && !before.enabled) {
     if (!st.aiConfigured) throw badRequest('Add the ANTHROPIC_API_KEY secret to this Worker in Cloudflare before turning the chatbot on.');
     if (!st.chatwootReady) throw badRequest('Connect Chatwoot (Settings → WhatsApp) before turning the chatbot on.');
   }
-  const value = { ...before, ...d, handoverKeywords: [...new Set(d.handoverKeywords.map((k) => k.toLowerCase()))] };
+  const wasLive = !!before.enabled && before.testMode === false;
+  // Never live by accident: switching ON (or out of test mode) without explicit confirmation keeps test mode on.
+  if (d.enabled && !d.testMode && !wasLive && !confirmLive) throw badRequest('Going live answers ALL new enquiries. Confirm to switch off test mode.');
+  if (d.enabled && d.testMode && !testNumbers.length) throw badRequest('Add at least one test number for test mode.');
+  const value = { ...before, ...d, testNumbers, handoverKeywords: [...new Set(d.handoverKeywords.map((k) => k.toLowerCase()))] };
   await atomic(async (tx) => {
+    if (value.enabled && !value.testMode && !wasLive) await audit(tx, req, 'CHATBOT_GO_LIVE', 'setting', 'chatbot', null, { confirmed: true });
     await tx.setting.upsert({ where: { key: 'chatbot' }, create: { key: 'chatbot', value }, update: { value } });
     await audit(tx, req, 'UPDATE', 'setting', 'chatbot', before, value);
   });
