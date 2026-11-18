@@ -19,7 +19,7 @@ type AiMode = 'reply' | 'handover' | 'error' | 'refusal';
 let aiMode: AiMode = 'reply';
 let aiOut: any = { reply: 'Hello! The Full Stack Web Development course is 6 months. May I know your name?', handover: false, handover_reason: '', lead: { name: null, email: null, city: null, course_interest: null, qualification: null } };
 let aiDelayMs = 0;
-const aiCalls: { headers: Record<string, string>; body: any }[] = [];
+const aiCalls: { url: string; headers: Record<string, string>; body: any }[] = [];
 // ── Chatwoot stub ──
 const cwSent: { conv: number; content: string; private: boolean }[] = [];
 const cwToggles: { conv: number; status: string }[] = [];
@@ -44,7 +44,7 @@ beforeAll(async () => {
     if (u.startsWith('https://api.anthropic.com/')) {
       const headers = Object.fromEntries(new Headers(init?.headers ?? {}).entries());
       const body = JSON.parse(String(init?.body ?? '{}'));
-      aiCalls.push({ headers, body });
+      aiCalls.push({ url: u, headers, body });
       if (aiDelayMs) await new Promise((r) => setTimeout(r, aiDelayMs));
       return aiResponse(body);
     }
@@ -110,7 +110,7 @@ describe('admin configuration and permissions', () => {
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.config.enabled).toBe(false);
     expect(r.body.config.systemPrompt).toMatch(/Nexora Academy/);
-    expect(r.body.status).toMatchObject({ enabled: false, aiConfigured: false, chatwootReady: true, model: 'claude-sonnet-5-5', active: false });
+    expect(r.body.status).toMatchObject({ enabled: false, aiConfigured: false, chatwootReady: true, model: 'claude-haiku-5-5', active: false });
     expect(r.body.fixedRules).toMatch(/Never invent/);
     expect(r.body.publishedCourses).toBeGreaterThan(0);
   });
@@ -172,12 +172,15 @@ describe('bot enabled', () => {
     const e = incoming(c, phone, 'Hi, I am Anu from Kochi. What is the fee for full stack?');
     await hook(e);
     const ev = await settled(e.id);
-    expect(ev, JSON.stringify(ev)).toMatchObject({ botStatus: 'REPLIED', contactKind: 'LEAD', botModel: 'claude-sonnet-5-5', inputTokens: 1200, outputTokens: 80 });
+    expect(ev, JSON.stringify(ev)).toMatchObject({ botStatus: 'REPLIED', contactKind: 'LEAD', botModel: 'claude-haiku-5-5', inputTokens: 1200, outputTokens: 80 });
     expect(botSent(c).map((x) => x.content)).toEqual([aiOut.reply]);
 
     const call = aiCalls[aiCalls.length - 1];
-    expect(call.body).toMatchObject({ model: 'claude-sonnet-5-5', fallbacks: 'default', output_config: { effort: 'low' } });
-    expect(call.headers['anthropic-beta']).toContain('server-side-fallback-2026-07-01');
+    expect(call.body).toMatchObject({ model: 'claude-haiku-5-5', output_config: { effort: 'low' } });
+    expect(call.body.max_tokens).toBeLessThanOrEqual(1500);
+    expect(call.body.fallbacks).toBeUndefined(); // never routed to another model
+    expect(call.headers['anthropic-beta']).toBeUndefined();
+    expect(call.url).toBe('https://api.anthropic.com/v1/messages');
     expect(call.headers['x-api-key'] ?? call.headers.authorization).toContain(FAKE_KEY); // key only in the auth header
     expect(JSON.stringify(call.body)).not.toContain(FAKE_KEY);
     const system = JSON.stringify(call.body.system);
@@ -357,12 +360,31 @@ describe('bot enabled', () => {
     }
   });
 
+  it('daily AI limit: beyond it no AI call is made and the conversation goes to the team', async () => {
+    await saveBot(admin, { dailyAiLimit: 1 });
+    try {
+      const c = ++conv;
+      const calls = aiCalls.length;
+      const e = incoming(c, newPhone(), 'Hi, one more question');
+      await hook(e);
+      expect(await settled(e.id)).toMatchObject({ botStatus: 'HANDOVER', botReason: 'Daily AI limit reached (1 replies today)' });
+      expect(aiCalls.length).toBe(calls);
+    } finally {
+      await saveBot(admin, { dailyAiLimit: 300 });
+    }
+  });
+
+  it('only Claude Haiku 5.5 is ever called', () => {
+    expect(aiCalls.length).toBeGreaterThan(0);
+    expect([...new Set(aiCalls.map((c) => c.body.model))]).toEqual(['claude-haiku-5-5']);
+  });
+
   it('test endpoint: generates a reply with a draft prompt, sends nothing, changes no record', async () => {
     const sent = cwSent.length;
     const leads = await prisma.lead.count();
     const r = await request(app).post('/api/v1/admin/chatbot/test').set(as(admin)).send({ message: 'What courses do you offer?', draft: { systemPrompt: 'Draft prompt DRAFT-MARKER for testing purposes only.' } });
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    expect(r.body).toMatchObject({ handover: false, model: 'claude-sonnet-5-5' });
+    expect(r.body).toMatchObject({ handover: false, model: 'claude-haiku-5-5' });
     expect(r.body.reply).toBeTruthy();
     expect(JSON.stringify(aiCalls[aiCalls.length - 1].body.system)).toContain('DRAFT-MARKER');
     expect(cwSent.length).toBe(sent);

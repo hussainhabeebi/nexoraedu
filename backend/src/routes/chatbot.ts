@@ -23,6 +23,7 @@ const configSchema = z.object({
   systemPrompt: z.string().trim().min(20, 'The system prompt is too short').max(20_000),
   knowledge: z.string().max(20_000),
   maxBotReplies: z.number().int().min(1).max(50),
+  dailyAiLimit: z.number().int().min(1).max(5000).default(300),
   handoverKeywords: z.array(z.string().trim().min(2).max(60)).max(40),
   handoverMessage: z.string().trim().min(5).max(500),
 });
