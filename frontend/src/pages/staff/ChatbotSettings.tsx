@@ -23,14 +23,14 @@ export default function ChatbotSettings() {
       setKeywords((data.config.handoverKeywords ?? []).join(', '));
     }
   }, [data]);
-  const body = () => ({ ...f, maxBotReplies: Number(f.maxBotReplies), handoverKeywords: keywords.split(',').map((k) => k.trim()).filter(Boolean) });
+  const body = () => ({ ...f, maxBotReplies: Number(f.maxBotReplies), dailyAiLimit: Number(f.dailyAiLimit ?? 300), handoverKeywords: keywords.split(',').map((k) => k.trim()).filter(Boolean) });
   const save = useMut((v: any) => api('/admin/chatbot', { method: 'PUT', body: v }), { success: 'Chatbot settings saved', invalidate: ['/admin/chatbot'] });
   const run = useMut(() => api('/admin/chatbot/test', { body: { message: test.message, draft: { systemPrompt: f.systemPrompt, knowledge: f.knowledge } } }), { onSuccess: (r: any) => setResult(r) });
   const resume = useMut((id: number) => api(`/admin/chatbot/conversations/${id}/resume`, { body: {} }), { success: 'The assistant will answer this conversation again', invalidate: ['/admin/chatbot'] });
   if (isLoading || !f) return <PageLoader />;
   const st = data.status;
   const missing = [!st.aiConfigured && 'the ANTHROPIC_API_KEY secret on this Worker (Cloudflare → Workers & Pages → this Worker → Settings → Variables and Secrets)', !st.chatwootReady && 'a working Chatwoot connection (Settings → WhatsApp)'].filter(Boolean);
-  const dirty = JSON.stringify(body()) !== JSON.stringify({ ...data.config, maxBotReplies: Number(data.config.maxBotReplies) });
+  const dirty = JSON.stringify(body()) !== JSON.stringify({ ...data.config, maxBotReplies: Number(data.config.maxBotReplies), dailyAiLimit: Number(data.config.dailyAiLimit ?? 300) });
 
   return (
     <div className="space-y-6">
@@ -65,6 +65,7 @@ export default function ChatbotSettings() {
         <div className="grid gap-4 sm:grid-cols-2">
           <Input className="sm:col-span-2" label="Hand over when the customer writes" value={keywords} onChange={(e) => setKeywords(e.target.value)} hint="Comma separated words or phrases, e.g. human, counsellor, call me, refund" />
           <Input label="Maximum assistant replies per conversation" type="number" min={1} max={50} value={f.maxBotReplies} onChange={(e) => setF({ ...f, maxBotReplies: e.target.value })} hint="Then a counsellor takes over" />
+          <Input label="Daily AI reply limit (cost safeguard)" type="number" min={1} max={5000} value={f.dailyAiLimit ?? 300} onChange={(e) => setF({ ...f, dailyAiLimit: e.target.value })} hint="After this many AI replies in a day, new conversations go to the team" />
           <div className="sm:col-span-2"><Textarea label="Message sent to the customer on handover" rows={2} value={f.handoverMessage} onChange={(e) => setF({ ...f, handoverMessage: e.target.value })} /></div>
           <p className="text-xs text-slate-500 sm:col-span-2">The assistant also hands over when it cannot answer from verified information, when the customer is upset or asks about payments, refunds or an existing admission, and as soon as any staff member replies. The lead owner (or the Sales Managers) is notified, and the conversation shows a private note in Chatwoot.</p>
         </div>

@@ -50,6 +50,8 @@ export const DEFAULT_SETTINGS = {
 - Encourage them to apply online or to visit or call the academy.`,
     knowledge: '',
     maxBotReplies: 8,
+    /** Cost safeguard: at most this many AI calls per day (academy calendar); then conversations go to staff. */
+    dailyAiLimit: 300,
     handoverKeywords: ['human', 'agent', 'counsellor', 'counselor', 'staff', 'call me', 'talk to someone', 'complaint', 'refund'] as string[],
     handoverMessage: 'Thank you! I have passed your message to our counsellor, who will reply to you here shortly.',
   },

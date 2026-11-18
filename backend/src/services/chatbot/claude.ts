@@ -2,18 +2,21 @@
  * Response generation with Anthropic Claude (official SDK). One request per incoming message, returning structured
  * output: the reply text, whether to hand over to a person (and why), and the enquiry details the customer stated.
  *
- * - Model: Claude Sonnet 5.5, adaptive thinking at LOW effort (chat replies; fast and inexpensive).
- * - Server-side refusal fallback ("default") is on, so a rare safety decline is re-run on a fallback model instead of
- *   leaving the customer without an answer; a refusal that remains becomes a human handover.
+ * - Model: Claude Haiku 5.5 ONLY (owner decision: lowest cost; never Sonnet or Opus). Adaptive thinking at LOW effort,
+ *   so the model thinks little or not at all on simple enquiries. No server-side fallback (it could route to another
+ *   model, and Haiku 5.5 has none): a refusal becomes a human handover.
+ * - Cost controls: short prompt (published facts only), last 12 messages of history, small max_tokens, prompt caching of
+ *   the stable system prompt, and a daily limit on AI replies (settings.chatbot.dailyAiLimit).
  * - The key is read only from the Worker secret ANTHROPIC_API_KEY, never stored, logged or returned.
  * - Only the conversation text and the published academy facts are sent: no phone numbers, ids or student records.
  */
 import Anthropic from '@anthropic-ai/sdk';
-import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
+import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import * as z from 'zod/v4';
 import { prisma } from '../../lib/prisma';
 
-export const CHATBOT_MODEL = 'claude-sonnet-5-5';
+/** The only model the chatbot uses. */
+export const CHATBOT_MODEL = 'claude-haiku-5-5';
 export const aiConfigured = () => !!process.env.ANTHROPIC_API_KEY;
 
 export const BotOutput = z.object({
@@ -52,7 +55,7 @@ export function systemText(adminPrompt: string, knowledge: string, facts: string
 export interface ChatTurn { role: 'user' | 'assistant'; text: string }
 
 /** Conversation in API shape: starts with the customer, ends with the customer, empty messages removed. */
-export function toMessages(turns: ChatTurn[]): Anthropic.Beta.BetaMessageParam[] {
+export function toMessages(turns: ChatTurn[]): Anthropic.MessageParam[] {
   const t = turns.filter((x) => x.text.trim());
   while (t.length && t[0].role !== 'user') t.shift();
   while (t.length && t[t.length - 1].role !== 'user') t.pop();
@@ -72,12 +75,10 @@ export async function generateBotReply(input: { system: string; turns: ChatTurn[
   let status: number | undefined;
   let error: string | undefined;
   try {
-    const res = await client.beta.messages.parse({
+    const res = await client.messages.parse({
       model: CHATBOT_MODEL,
-      max_tokens: 4000,
-      betas: ['server-side-fallback-2026-07-01'],
-      fallbacks: 'default',
-      output_config: { effort: 'low', format: betaZodOutputFormat(BotOutput) },
+      max_tokens: 1500, // room for brief thinking plus a short WhatsApp reply (thinking counts toward this)
+      output_config: { effort: 'low', format: zodOutputFormat(BotOutput) },
       system: [{ type: 'text', text: input.system, cache_control: { type: 'ephemeral' } }],
       messages,
     });

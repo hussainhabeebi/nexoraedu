@@ -15,7 +15,7 @@
  */
 import { prisma } from '../../lib/prisma';
 import { getSettings, type Settings } from '../../lib/settings';
-import { formatDate } from '../../lib/caldate';
+import { formatDate, toCalendarDate, zonedTimeToUtc } from '../../lib/caldate';
 import { normalizeEmail } from '../../lib/util';
 import * as cw from '../chatwoot';
 import { notifyRole, notifyUser } from '../notify';
@@ -169,6 +169,11 @@ export async function runBot(m: IncomingForBot) {
     if (!m.content.trim()) return setEvent(m.eventId, { botStatus: 'SKIPPED', botReason: 'No text (attachment or empty message)' });
     if (wantsHuman(m.content, s.chatbot.handoverKeywords)) return void (await handOver(m.conversationId, 'The customer asked for a person', { eventId: m.eventId, leadId: m.leadId }));
     if (conv.botReplies >= s.chatbot.maxBotReplies) return void (await handOver(m.conversationId, `Reply limit reached (${s.chatbot.maxBotReplies} assistant replies)`, { eventId: m.eventId, leadId: m.leadId }));
+
+    // Cost safeguard: at most dailyAiLimit AI calls per academy day; beyond it the team answers.
+    const dayStart = zonedTimeToUtc(toCalendarDate(new Date(), s.academy.timeZone), s.academy.timeZone);
+    const usedToday = await prisma.chatwootMessageEvent.count({ where: { createdAt: { gte: dayStart }, inputTokens: { not: null } } });
+    if (usedToday >= (s.chatbot.dailyAiLimit ?? 300)) return void (await handOver(m.conversationId, `Daily AI limit reached (${s.chatbot.dailyAiLimit ?? 300} replies today)`, { eventId: m.eventId, leadId: m.leadId }));
 
     await setEvent(m.eventId, { botStatus: 'PENDING', botModel: CHATBOT_MODEL });
     const facts = await academyFacts();
